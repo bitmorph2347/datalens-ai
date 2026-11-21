@@ -73,6 +73,13 @@ COMPETITION_ALIASES = {
 BOWL_KIND = {"RAP": "pace", "LAP": "pace", "OB": "spin", "LB": "spin", "SLA": "spin", "LCH": "spin"}
 
 
+TEAM_SHORT = {
+    "csk": "Chennai Super Kings", "mi": "Mumbai Indians", "rcb": "Royal Challengers Bengaluru", "kkr": "Kolkata Knight Riders",
+    "srh": "Sunrisers Hyderabad", "dc": "Delhi Capitals", "pbks": "Punjab Kings", "rr": "Rajasthan Royals",
+    "gt": "Gujarat Titans", "lsg": "Lucknow Super Giants",
+}
+
+
 def canon_competition(name: str | None) -> str:
     if not name:
         return "Unknown"
@@ -80,7 +87,10 @@ def canon_competition(name: str | None) -> str:
 
 
 def canon_team(name: str | None) -> str | None:
-    return TEAM_CANON.get(name, name) if name else name
+    if not name:
+        return name
+    name = TEAM_SHORT.get(name.strip().lower(), name.strip())
+    return TEAM_CANON.get(name, name)
 
 
 def canon_venue(name: str | None) -> str | None:

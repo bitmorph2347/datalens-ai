@@ -16,8 +16,9 @@ from pydantic import BaseModel, Field
 
 from . import budget, config, similarity
 from .chat import ChatAgent, safe_select
-from .engine import DEFAULT_TEMPLATE, Engine, records
+from .engine import DEFAULT_TEMPLATE, Engine, Filters, records
 from .reports import render_report, to_csv
+from .rosters import RosterStore
 from .uploads import MAX_MB, UploadStore
 
 
@@ -71,6 +72,19 @@ class BudgetReq(BaseModel):
     bowl_formula: str | None = None
     exclude: list[str] = Field(default_factory=list)
     active_only: bool = True
+    team: str | None = None          # your team: other teams' players are then excluded
+    use_roster: bool = True          # exclude players on other teams (needs a competition and team)
+    free: list[str] = Field(default_factory=list)    # released / free players (override other teams' lists)
+    taken: list[str] = Field(default_factory=list)   # not available: signed elsewhere, retired, injured
+
+
+class RosterSaveReq(BaseModel):
+    filters: dict = Field(default_factory=dict)
+    season: int
+    team: str
+    retained: list[str] = Field(default_factory=list)
+    free: list[str] = Field(default_factory=list)
+    taken: list[str] = Field(default_factory=list)
 
 
 class ChatReq(BaseModel):
@@ -97,12 +111,13 @@ class ProjectReq(BaseModel):
     notes: str = ""
 
 
-def create_app(engine: Engine | None = None, projects_dir: Path | None = None) -> FastAPI:
+def create_app(engine: Engine | None = None, projects_dir: Path | None = None, rosters_path: Path | None = None) -> FastAPI:
     app = FastAPI(title="DataLens AI", version="0.1.0",
                   description="Cricket analytics: roles, custom metrics, matchups, venues, auction tools.")
     engine = engine or Engine()
     agent = ChatAgent(engine)
     uploads = UploadStore()
+    rosters = RosterStore(engine, rosters_path or config.ROSTERS_CSV)
     pdir = Path(projects_dir or config.PROJECTS_DIR)
     state = {"prices": None, "prices_source": "none"}
 
@@ -213,12 +228,48 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None) -
             extra = {"derived_gaps": g}
             if not slots:
                 raise HTTPException(400, "Your squad already covers the template - nothing to buy.")
+        exclude, active_only, roster_info = req.exclude + req.squad, req.active_only, None
+        if req.use_roster and req.team:
+            un = guard(rosters.unavailable, Filters.from_dict(req.filters), req.team, req.free, req.taken)
+            exclude = exclude + sorted(un["players"])
+            active_only = False  # released / unsigned players did not play the latest season for any team
+            roster_info = {"team": req.team, "excluded_players": len(un["players"]), "other_teams": un["other_teams"],
+                           "unresolved": un["unresolved"], "latest_season": un["latest_season"],
+                           "file_season": un["file_season"],
+                           "note": ("Players on the other teams' squads were excluded "
+                                    + (f"(roster file {un['file_season']} where listed, otherwise auto-guessed from the "
+                                       f"{un['latest_season']} season). " if un["file_season"] else
+                                       f"(auto-guessed from the {un['latest_season']} season; save a roster file to make this exact). ")
+                                    + "Only players seen in the latest or previous season are suggested (the data can't know about retirements); check the 'last season' column.")}
         res = guard(budget.optimize, engine, prices(), req.purse, slots, max_overseas=req.max_overseas,
                     filters=req.filters, bat_formula=req.bat_formula, bowl_formula=req.bowl_formula,
-                    exclude=req.exclude + req.squad, active_only=req.active_only)
+                    exclude=exclude, active_only=active_only,
+                    min_last_season=(roster_info or {}).get("latest_season", 0) - 1 or None)
+        res["roster"] = roster_info
         res["price_source"] = state["prices_source"]
         res["slots"] = slots
         return res | extra
+
+    # ---------------------------------------------------------------- rosters
+    @app.get("/api/rosters/teams")
+    def roster_teams(competition: str | None = None, format: str | None = None, gender: str | None = None):
+        return guard(rosters.teams, Filters.from_dict({"competition": competition, "format": format, "gender": gender}))
+
+    @app.get("/api/rosters/squad")
+    def roster_squad(team: str, competition: str | None = None, format: str | None = None, gender: str | None = None):
+        return guard(rosters.team_squad, Filters.from_dict({"competition": competition, "format": format, "gender": gender}), team)
+
+    @app.post("/api/rosters/save")
+    def roster_save(req: RosterSaveReq):
+        return guard(rosters.save, Filters.from_dict(req.filters), req.season, req.team, req.retained, req.free, req.taken)
+
+    @app.post("/api/rosters/upload")
+    async def roster_upload(file: UploadFile = File(...)):
+        try:
+            df = pd.read_csv(io.BytesIO(await file.read()), dtype=str)
+        except Exception as exc:
+            raise HTTPException(400, f"Could not read the file: {exc}") from None
+        return guard(rosters.upload, df)
 
     # ---------------------------------------------------------------- chat
     @app.post("/api/chat")

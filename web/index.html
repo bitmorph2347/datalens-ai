@@ -132,9 +132,15 @@
 <section id="tab-auction" class="tab">
   <div class="card">
     <h2>Auction planner</h2>
-    <p class="hint">1) List your current squad &rarr; 2) see role gaps &rarr; 3) get the best-value buys within your purse.</p>
+    <p class="hint">1) Pick the tournament (sidebar Competition) and your team &rarr; 2) load your squad and remove anyone you are releasing &rarr; 3) find gaps &rarr; 4) get the best-value buys from players <b>actually available</b> (not on other teams) within your purse.</p>
+    <div class="grid">
+      <label>Tournament<input id="a-comp" disabled placeholder="set Competition in the sidebar"></label>
+      <label>My team<select id="a-team"><option value="">Pick a competition in the sidebar</option></select></label>
+      <label>&nbsp;<button id="a-load">Load squad</button></label>
+    </div>
+    <p id="a-roster-note" class="hint"></p>
     <div class="grid2">
-      <label>Current squad (one name per line)<textarea id="a-squad" rows="8" placeholder="Virat Kohli&#10;Jasprit Bumrah&#10;..."></textarea></label>
+      <label>My squad (one name per line - editable)<textarea id="a-squad" rows="8" placeholder="Click Load squad, or type names:&#10;Ruturaj Gaikwad&#10;MS Dhoni&#10;..."></textarea></label>
       <div>
         <div class="grid">
           <label>Purse (cr)<input id="a-purse" type="number" value="50" step="0.5"></label>
@@ -146,6 +152,16 @@
         <p class="hint">Here a <b>higher score is better</b>, so put a minus sign on metrics where lower is better (economy): <code>-0.5*z(death_economy)+0.3*z(death_wickets)+0.2*z(death_dot_pct)</code>. Leave a formula box empty to use the default.</p>
       </div>
     </div>
+    <label class="check"><input type="checkbox" id="a-avail" checked> Only suggest players who are available to buy (exclude players on other teams' squads)</label>
+    <details open><summary>Release / trade lists (update these every year)</summary>
+      <div class="grid2">
+        <label>Released / free players <small>one per line - released by any team, free to buy</small><textarea id="a-free" rows="4"></textarea></label>
+        <label>Not available <small>one per line - signed by other teams, retired, injured</small><textarea id="a-taken" rows="4"></textarea></label>
+      </div>
+      <div class="row"><label class="inline">Season <input id="a-season" type="number" style="width:90px"></label>
+        <button id="a-save">Save roster</button><label class="inline">Roster file <input type="file" id="a-rfile" accept=".csv"></label>
+        <span id="a-save-note" class="hint">Saving stores your squad and these lists in <code>data/rosters.csv</code> for next time. Columns for a file: competition,season,team,player,status (retained / released).</span></div>
+    </details>
     <h3>Roles to fill <small class="hint">(leave all as-is to use the gaps from your squad)</small></h3>
     <div class="grid" id="a-slots"></div>
     <div class="row">

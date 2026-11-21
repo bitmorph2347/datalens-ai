@@ -25,7 +25,7 @@ Built around a real franchise problem: *"We need the best **middle-order** batte
 | **Matchups** | Batter vs pace / spin (and finer bowling styles), bowler vs left / right-handers, batter vs bowler, best and worst opponents. |
 | **Venues & conditions** | Scoring, phase run rates, chase/toss tendencies per ground; or filter any ranking to one venue. |
 | **Replacement finder** | Statistical-profile similarity (z-scored features, optional weights) with price, nationality and "currently active" filters. |
-| **Auction planner** | Enter your squad -> find role gaps -> exact **MILP** (SciPy/HiGHS) picks the highest-fit buys within purse, role slots and overseas cap. |
+| **Auction planner** | Pick a tournament and your team -> load your squad -> find role gaps -> exact **MILP** (SciPy/HiGHS) picks the highest-fit buys within purse, role slots and overseas cap, **only from players who are actually available** (not on other teams' squads). Releases, retentions and trades are kept in a yearly roster file. |
 | **Your own data** | Upload a CSV (up to 200 MB by default): data-quality score, missing/duplicate/outlier/inconsistency detection, one-click cleaning, guarded SQL, quick charts. |
 | **Save & export** | Save ranking setups, export CSV or a printable HTML report. |
 
@@ -45,6 +45,19 @@ The loader needs about 1 GB of temporary disk space and deletes the extracted CS
 **Keeping data fresh:** the database is a snapshot. After more matches have been played, run `python -m datalens.loader --update` (re-downloads Cricsheet data, rebuilds the database, prints how many matches were added) and restart the app. Cricsheet publishes after matches finish, so there is no live-match data. New players need a row in `data/players_meta.csv` to appear in bowler-type / batter-hand filters.
 
 Optional: `export ANTHROPIC_API_KEY=...` to enable free-form chat (model via `DATALENS_MODEL`, default `claude-sonnet-5-5`). `export DATALENS_MAX_UPLOAD_MB=500` to change the upload limit.
+
+## Auction planner: tournaments, teams and yearly updates
+
+1. Set **Competition** in the sidebar (e.g. IPL, SA20, BBL) and open the **Auction** tab.
+2. Choose **your team** and click **Load squad**; remove anyone you are releasing.
+3. **Find gaps**, set your purse and overseas limit, then **Optimise squad**.
+
+Who is "available"? Cricsheet has match data only, so rosters come from two places (`datalens/rosters.py`):
+
+- **Auto-guess:** a team's squad is everyone who played for it in the tournament's latest season. Players on *other* teams' squads are never suggested. Players seen only before the previous season are skipped (the data can't know about retirements), and every suggestion shows the last season the player appeared in.
+- **Roster file** `data/rosters.csv` (template: `docs/rosters.example.csv`): after each retention / release / trade window, save the new squads from the Auction tab ("Save roster") or upload a CSV with columns `competition,season,team,player,status` (`retained` or `released`). A team with retained rows in the newest season of the file uses them instead of the auto-guess; `released` players are free to buy; a trade is a `retained` row under the new team. The two text boxes in the tab cover quick edits: *Released / free players* and *Not available* (signed elsewhere, retired, injured).
+
+Each year: run `python -m datalens.loader --update` for new matches, then update the rosters. Prices still come from the price list (sample prices are synthetic - upload real ones), and only priced players can be suggested. The Hundred is not covered (different structure; see limitations).
 
 ## The headline example
 

@@ -58,11 +58,19 @@ def make_sample_prices(engine: Engine, path=config.PRICES_CSV) -> pd.DataFrame:
     return out
 
 
+def _last_seasons(engine: Engine, f: Filters) -> pd.DataFrame:
+    """The last season each player appeared in this scope (format / gender / competition)."""
+    q = _Q()
+    cond = engine._scope(Filters(format=f.format, gender=f.gender, competition=f.competition, team_type=f.team_type), q, with_season=False)
+    return engine.query(f"""SELECT p AS player, max(season) AS last_season FROM (
+        SELECT striker AS p, season FROM balls WHERE {cond} UNION ALL SELECT bowler, season FROM balls WHERE {cond}) GROUP BY p""", q.params)
+
+
 def optimize(engine: Engine, prices: pd.DataFrame, purse: float, slots: dict[str, int], *,
              max_overseas: int = 4, filters: dict | None = None, bat_formula: str | None = None,
              bowl_formula: str | None = None, pool_size: int = 40, exclude: list[str] | None = None,
              min_balls_bat: int | None = None, min_balls_bowl: int | None = None,
-             active_only: bool = True) -> dict:
+             active_only: bool = True, min_last_season: int | None = None) -> dict:
     """Maximise total role-fit score within the purse, slot counts per role and overseas cap (exact MILP)."""
     f = Filters.from_dict(filters)
     if not (f.last_n_seasons or f.season_from):
@@ -73,12 +81,16 @@ def optimize(engine: Engine, prices: pd.DataFrame, purse: float, slots: dict[str
     for r in slots:
         if r not in BAT_ROLES and r not in BOWL_ROLES:
             raise ValueError(f"Unknown role '{r}'")
-    exclude_set = {engine.resolver.resolve(e, 0.8) or e for e in (exclude or [])}
+    exclude_set = {e if e in engine._player_set else (engine.resolver.resolve(e, 0.8) or e) for e in (exclude or [])}
     price = prices.set_index("player")
     pool_players = [p for p in price.index if p not in exclude_set]
     if active_only:
         active = engine.active_players(f)
         pool_players = [p for p in pool_players if p in active]
+    last = _last_seasons(engine, f)
+    if min_last_season:  # skip players not seen recently (likely retired / out of the league)
+        seen = set(last.loc[last.last_season >= min_last_season, "player"])
+        pool_players = [p for p in pool_players if p in seen]
     cand: list[dict] = []
     warnings: list[str] = []
     for role in slots:
@@ -129,13 +141,15 @@ def optimize(engine: Engine, prices: pd.DataFrame, purse: float, slots: dict[str
     # next-best alternatives per slot: top unselected candidates by value
     alts = c[~c.player.isin(pick.player)].assign(value=lambda d: d.score / d.price.clip(lower=0.3)) \
         .sort_values("value", ascending=False).head(8)
+    pick = pick.merge(last, on="player", how="left")
+    alts = alts.merge(last, on="player", how="left")
     unk = int((pick.nationality == "UNK").sum())
     if unk:
         warnings.append(f"{unk} selected player(s) have unknown nationality and were treated as Indian; check the overseas cap.")
     return {
         "purse": purse, "spent": round(float(pick.price.sum()), 2), "remaining": round(float(purse - pick.price.sum()), 2),
         "overseas_used": int(pick.overseas.sum()), "max_overseas": max_overseas, "total_score": round(float(pick.score.sum()), 1),
-        "selected": records(pick[["player", "role", "score", "raw_score", "price", "nationality"]]),
-        "unfilled": unfilled, "alternatives": records(alts[["player", "role", "score", "price", "nationality"]]),
+        "selected": records(pick[["player", "role", "score", "raw_score", "price", "nationality", "last_season"]]),
+        "unfilled": unfilled, "alternatives": records(alts[["player", "role", "score", "price", "nationality", "last_season"]]),
         "filters_text": f.describe(), "optimal": not relaxed, "warnings": warnings,
     }

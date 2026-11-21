@@ -6,6 +6,7 @@ RAW_DIR = DATA_DIR / "raw"
 DB_PATH = DATA_DIR / "datalens.duckdb"
 META_CSV = DATA_DIR / "players_meta.csv"
 PRICES_CSV = DATA_DIR / "prices_sample.csv"
+ROSTERS_CSV = DATA_DIR / "rosters.csv"  # your yearly retained / released lists (see docs/rosters.example.csv)
 PROJECTS_DIR = DATA_DIR / "projects"
 WEB_DIR = ROOT / "web"
 CRICSHEET_BASE = "https://cricsheet.org/downloads"

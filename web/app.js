@@ -147,6 +147,7 @@ async function init() {
   $("#examples").innerHTML = ex.map((q) => `<span class="chip">${esc(q)}</span>`).join("");
   $$("#examples .chip").forEach((c) => (c.onclick = () => { $("#chatin").value = c.textContent; $("#chatform").requestSubmit(); }));
   buildSlots();
+  refreshComp();
   addChat("assistant", `Ask me about IPL players. I can rank by role (opener, middle order, finisher, powerplay / middle / death bowlers), phase, venue and matchups. ${META.chat_mode === "rules" ? "Running in built-in parser mode - set ANTHROPIC_API_KEY for free-form questions." : ""}`);
 }
 
@@ -297,7 +298,48 @@ function buildSlots() {
   delete roles.pacer; delete roles.spinner;
   $("#a-slots").innerHTML = Object.keys(roles).map((r) => `<label>${nice(r)}<input type="number" min="0" max="6" data-slot="${r}" placeholder="auto"></label>`).join("");
 }
-const squadList = () => $("#a-squad").value.split("\n").map((s) => s.trim()).filter(Boolean);
+const lines = (id) => $(id).value.split("\n").map((s) => s.trim()).filter(Boolean);
+const squadList = () => lines("#a-squad");
+
+/* tournament -> team -> squad */
+async function loadTeams() {
+  const sel = $("#a-team"), c = scope().competition;
+  if (!c) { sel.innerHTML = '<option value="">Pick a competition in the sidebar</option>'; return; }
+  try {
+    const r = await api("/api/rosters/teams?" + new URLSearchParams(scope()));
+    sel.innerHTML = '<option value="">(choose your team)</option>' + r.teams.map((t) => `<option value="${esc(t.team)}">${esc(t.team)} (${t.players})</option>`).join("");
+    if (!$("#a-season").value) $("#a-season").value = r.file_season || r.latest_season + 1;
+    if (r.free_players.length && !$("#a-free").value) $("#a-free").value = r.free_players.join("\n");
+  } catch (e) { sel.innerHTML = `<option value="">${esc(e.message)}</option>`; }
+}
+function refreshComp() { $("#a-comp").value = scope().competition || ""; loadTeams(); }
+["#sc-format", "#sc-gender", "#sc-comp"].forEach((id) => $(id).addEventListener("change", refreshComp));
+$("#a-load").onclick = (e) => busy(e.target, async () => {
+  const note = $("#a-roster-note");
+  try {
+    if (!$("#a-team").value) throw new Error("Choose your team first (and set Competition in the sidebar, e.g. IPL).");
+    const r = await api("/api/rosters/squad?" + new URLSearchParams({ ...scope(), team: $("#a-team").value }));
+    $("#a-squad").value = r.players.join("\n");
+    if (r.free_players.length) $("#a-free").value = r.free_players.join("\n");
+    note.textContent = `${r.team}: ${r.players.length} players - ${r.source}. Remove anyone you are releasing, then click Find gaps.`;
+  } catch (err) { note.textContent = err.message; }
+});
+$("#a-save").onclick = (e) => busy(e.target, async () => {
+  const note = $("#a-save-note");
+  try {
+    if (!$("#a-team").value) throw new Error("Choose your team first.");
+    const r = await api("/api/rosters/save", { filters: scope(), season: Number($("#a-season").value), team: $("#a-team").value,
+      retained: squadList(), free: lines("#a-free"), taken: lines("#a-taken") });
+    note.textContent = `Saved for ${r.team} ${r.season}: ${r.saved.retained} retained, ${r.saved.free} free, ${r.saved.taken} unavailable.` + (r.unresolved.length ? ` Not recognised: ${r.unresolved.join(", ")}.` : "");
+    loadTeams();
+  } catch (err) { note.textContent = err.message; }
+});
+$("#a-rfile").onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try { const r = await api("/api/rosters/upload", fd); $("#a-save-note").textContent = `Roster file loaded: ${r.rows} rows for ${r.competitions.join(", ")}.` + (r.unmatched.length ? ` Not matched: ${r.unmatched.slice(0, 6).join(", ")}.` : ""); loadTeams(); }
+  catch (err) { $("#a-save-note").textContent = err.message; }
+};
 const aFilters = () => ({ ...scope(), last_n_seasons: Number($("#a-last").value || 3) });
 $("#a-gaps").onclick = (e) => busy(e.target, async () => {
   const out = $("#a-out"); out.innerHTML = "";
@@ -316,17 +358,21 @@ $("#a-run").onclick = (e) => busy(e.target, async () => {
   const out = $("#a-out"); out.innerHTML = '<div class="card">Optimising...</div>';
   const slots = {};
   $$("#a-slots input").forEach((i) => { if (i.value && Number(i.value) > 0) slots[i.dataset.slot] = Number(i.value); });
+  const useRoster = $("#a-avail").checked;
+  if (useRoster && !$("#a-team").value) { showErr(out, new Error("Pick your team (and set Competition in the sidebar) so other teams' players can be excluded - or untick 'Only suggest players who are available'.")); return; }
   const body = { purse: Number($("#a-purse").value), max_overseas: Number($("#a-os").value), filters: aFilters(), squad: squadList(),
-    bat_formula: $("#a-bf").value || null, bowl_formula: $("#a-wf").value || null };
+    bat_formula: $("#a-bf").value || null, bowl_formula: $("#a-wf").value || null,
+    team: useRoster ? $("#a-team").value : null, use_roster: useRoster, free: lines("#a-free"), taken: lines("#a-taken") };
   if (Object.keys(slots).length) body.slots = slots;
   try {
     const r = await api("/api/budget", body);
     out.innerHTML = "";
     if (r.derived_gaps) renderGaps(out, r.derived_gaps);
-    const extra = `<div class="kv"><div><b>${fmt(r.spent)} cr</b><span>spent of ${r.purse}</span></div><div><b>${fmt(r.remaining)} cr</b><span>remaining</span></div><div><b>${r.overseas_used}/${r.max_overseas}</b><span>overseas</span></div><div><b>${fmt(r.total_score)}</b><span>total fit score</span></div></div>`;
+    const extra = `<div class="kv"><div><b>${fmt(r.spent)} cr</b><span>spent of ${r.purse}</span></div><div><b>${fmt(r.remaining)} cr</b><span>remaining</span></div><div><b>${r.overseas_used}/${r.max_overseas}</b><span>overseas</span></div><div><b>${fmt(r.total_score)}</b><span>total fit score</span></div></div>` +
+      (r.roster ? `<p class="hint">${esc(r.roster.note)} Excluded ${r.roster.excluded_players} players from ${r.roster.other_teams} other teams.${r.roster.unresolved.length ? " Not recognised: " + esc(r.roster.unresolved.join(", ")) + "." : ""}</p>` : "");
     renderBlock(out, { title: r.optimal ? "Best squad within budget" : "Best partial squad within budget", sub: `${r.filters_text}. Prices: ${r.price_source}. Fit score = percentile within role pool.`, extra,
-      cols: ["role", "player", "score", "price", "nationality"], rows: r.selected, warnings: r.warnings, chart: { label: "player", value: "price" } });
-    renderBlock(out, { title: "Next-best value alternatives", cols: ["player", "role", "score", "price", "nationality"], rows: r.alternatives, noActions: true });
+      cols: ["role", "player", "score", "price", "nationality", "last_season"], rows: r.selected, warnings: r.warnings, chart: { label: "player", value: "price" } });
+    renderBlock(out, { title: "Next-best value alternatives", cols: ["player", "role", "score", "price", "nationality", "last_season"], rows: r.alternatives, noActions: true });
   } catch (err) { showErr(out, err); }
 });
 $("#a-file").onchange = async (e) => {
