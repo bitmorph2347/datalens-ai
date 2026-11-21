@@ -4,6 +4,14 @@ Ask questions about IPL ball-by-ball data in plain English, then build **your ow
 
 ![Rankings](docs/rankings.jpg)
 
+<table>
+<tr>
+<td width="33%"><img src="docs/chat.jpg" alt="Chat"><br><sub>Ask in plain English; every answer shows its steps</sub></td>
+<td width="33%"><img src="docs/matchups.jpg" alt="Matchups"><br><sub>Batter vs pace / spin with data-coverage warnings</sub></td>
+<td width="33%"><img src="docs/auction.jpg" alt="Auction planner"><br><sub>Best squad within purse, role slots and overseas cap</sub></td>
+</tr>
+</table>
+
 ## What it does
 
 | Feature | How it works |
@@ -17,6 +25,14 @@ Ask questions about IPL ball-by-ball data in plain English, then build **your ow
 | **Auction planner** | Enter your squad -> find role gaps -> exact **MILP** (SciPy/HiGHS) picks the highest-fit buys within purse, role slots and overseas cap. |
 | **Your own data** | Upload a CSV: data-quality score, missing/duplicate/outlier/inconsistency detection, one-click cleaning, guarded SQL, quick charts. |
 | **Save & export** | Save ranking setups, export CSV or a printable HTML report. |
+
+## Engineering highlights
+
+- **Correctness checked against independent SQL:** 81 tests verify strike rate, economy, head-to-head and pace/spin totals against separate calculations, plus role rules (no openers in the middle-order list), constraint satisfaction in the optimiser and the API.
+- **Safe by construction:** user formulas compile from an AST whitelist; the analytics database is read-only with file access disabled; the SQL tool rejects anything but a single `SELECT`.
+- **Honest analytics:** minimum-sample guards, small-sample flags, and explicit coverage warnings when metadata is incomplete.
+- **Entity resolution:** team and venue renames are merged (e.g. Delhi Daredevils -> Delhi Capitals, Kotla -> Arun Jaitley Stadium) and free-text player names resolve to Cricsheet names (`Rohit Sharma` -> `RG Sharma`).
+- **Exact optimisation:** the auction planner solves a mixed-integer program rather than a greedy pick.
 
 ## Quick start
 
