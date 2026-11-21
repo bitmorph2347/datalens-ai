@@ -29,7 +29,20 @@ BOWL_METRICS = {
     "economy": "Runs per over", "bowling_average": "Runs per wicket", "bowling_sr": "Balls per wicket",
     "dot_pct": "% dot balls", "boundary_pct": "% balls hit for 4/6", "wickets_per_over": "Wickets per over",
 }
-LOWER_IS_BETTER = {"economy", "bowling_average", "bowling_sr", "boundary_pct_conceded"}
+PHASE_PREFIX = {"pp": "powerplay", "mid": "middle", "death": "death"}
+PHASE_MIN_BALLS = 12  # phase metrics are blank (and the player drops out of that ranking) below this sample
+for _p, _name in PHASE_PREFIX.items():
+    BAT_METRICS.update({
+        f"{_p}_balls": f"Balls faced in the {_name} overs", f"{_p}_runs": f"Runs in the {_name} overs",
+        f"{_p}_strike_rate": f"Strike rate in the {_name} overs", f"{_p}_boundary_pct": f"% of {_name}-over balls hit for 4/6",
+        f"{_p}_dot_pct": f"% of {_name}-over balls that were dots", f"{_p}_dismissals": f"Times dismissed in the {_name} overs",
+    })
+    BOWL_METRICS.update({
+        f"{_p}_balls": f"Legal balls bowled in the {_name} overs", f"{_p}_wickets": f"Wickets in the {_name} overs",
+        f"{_p}_economy": f"Economy in the {_name} overs", f"{_p}_dot_pct": f"% dot balls in the {_name} overs",
+        f"{_p}_wickets_per_over": f"Wickets per over in the {_name} overs",
+    })
+LOWER_IS_BETTER = {"economy", "bowling_average", "bowling_sr", "boundary_pct_conceded", "pp_economy", "mid_economy", "death_economy"}
 
 BAT_ROLES = {
     "opener": "Usually bats at 1-2",
@@ -477,6 +490,27 @@ class Engine:
         if allowed is not None:
             where.append(f"{key} IN (SELECT unnest({_lit(allowed)}))")
         where_sql = " AND ".join(where)
+        bat_phase_agg = bat_phase_derived = bowl_phase_agg = bowl_phase_derived = ""
+        for pre, ph in PHASE_PREFIX.items():
+            bat_phase_agg += f""",
+                 sum((b.batter_faced AND b.phase = '{ph}')::INT) AS {pre}_balls,
+                 sum(CASE WHEN b.phase = '{ph}' THEN b.runs_off_bat ELSE 0 END) AS {pre}_runs,
+                 sum((b.striker_out AND b.phase = '{ph}')::INT) AS {pre}_dismissals,
+                 sum((b.is_boundary AND b.phase = '{ph}')::INT) AS {pre}_bnd,
+                 sum((b.batter_faced AND b.phase = '{ph}' AND b.runs_off_bat = 0)::INT) AS {pre}_dots"""
+            bat_phase_derived += f""",
+                 CASE WHEN {pre}_balls >= {PHASE_MIN_BALLS} THEN {pre}_runs * 100.0 / {pre}_balls END AS {pre}_strike_rate,
+                 CASE WHEN {pre}_balls >= {PHASE_MIN_BALLS} THEN {pre}_bnd * 100.0 / {pre}_balls END AS {pre}_boundary_pct,
+                 CASE WHEN {pre}_balls >= {PHASE_MIN_BALLS} THEN {pre}_dots * 100.0 / {pre}_balls END AS {pre}_dot_pct"""
+            bowl_phase_agg += f""",
+                 sum((b.legal_ball AND b.phase = '{ph}')::INT) AS {pre}_balls,
+                 sum(CASE WHEN b.phase = '{ph}' THEN b.runs_conceded ELSE 0 END) AS {pre}_runs,
+                 sum((b.bowler_wicket AND b.phase = '{ph}')::INT) AS {pre}_wickets,
+                 sum((b.legal_ball AND b.phase = '{ph}' AND b.runs_conceded = 0)::INT) AS {pre}_dots"""
+            bowl_phase_derived += f""",
+                 CASE WHEN {pre}_balls >= {PHASE_MIN_BALLS} THEN {pre}_runs * 6.0 / {pre}_balls END AS {pre}_economy,
+                 CASE WHEN {pre}_balls >= {PHASE_MIN_BALLS} THEN {pre}_dots * 100.0 / {pre}_balls END AS {pre}_dot_pct,
+                 CASE WHEN {pre}_balls >= {PHASE_MIN_BALLS} THEN {pre}_wickets * 6.0 / {pre}_balls END AS {pre}_wickets_per_over"""
         if side == "bat":
             agg = f"""SELECT {key} AS player,
                  count(DISTINCT b.match_id * 10 + b.innings) AS innings,
@@ -484,15 +518,15 @@ class Engine:
                  sum(b.striker_out::INT) AS dismissals,
                  sum((b.runs_off_bat = 4 AND b.is_boundary)::INT) AS fours,
                  sum((b.runs_off_bat = 6 AND b.is_boundary)::INT) AS sixes,
-                 sum((b.batter_faced AND b.runs_off_bat = 0)::INT) AS dots
+                 sum((b.batter_faced AND b.runs_off_bat = 0)::INT) AS dots{bat_phase_agg}
                FROM {from_sql} WHERE {where_sql} GROUP BY {key}"""
-            derived = """SELECT *, runs * 100.0 / NULLIF(balls, 0) AS strike_rate,
+            derived = f"""SELECT *, runs * 100.0 / NULLIF(balls, 0) AS strike_rate,
                  runs * 1.0 / NULLIF(dismissals, 0) AS average,
                  (fours + sixes) * 100.0 / NULLIF(balls, 0) AS boundary_pct,
                  dots * 100.0 / NULLIF(balls, 0) AS dot_pct,
                  balls * 1.0 / NULLIF(dismissals, 0) AS balls_per_dismissal,
                  runs * 1.0 / NULLIF(innings, 0) AS runs_per_innings,
-                 (fours * 4 + sixes * 6) * 100.0 / NULLIF(runs, 0) AS boundary_runs_pct FROM agg"""
+                 (fours * 4 + sixes * 6) * 100.0 / NULLIF(runs, 0) AS boundary_runs_pct{bat_phase_derived} FROM agg"""
         else:
             agg = f"""SELECT {key} AS player,
                  count(DISTINCT b.match_id * 10 + b.innings) AS innings,
@@ -501,14 +535,14 @@ class Engine:
                  sum((b.legal_ball AND b.runs_conceded = 0)::INT) AS dots,
                  sum((b.runs_off_bat = 4 AND b.is_boundary)::INT) AS fours,
                  sum((b.runs_off_bat = 6 AND b.is_boundary)::INT) AS sixes,
-                 sum((b.wides > 0)::INT) AS wides, sum((b.noballs > 0)::INT) AS noballs
+                 sum((b.wides > 0)::INT) AS wides, sum((b.noballs > 0)::INT) AS noballs{bowl_phase_agg}
                FROM {from_sql} WHERE {where_sql} GROUP BY {key}"""
-            derived = """SELECT *, balls / 6.0 AS overs, runs * 6.0 / NULLIF(balls, 0) AS economy,
+            derived = f"""SELECT *, balls / 6.0 AS overs, runs * 6.0 / NULLIF(balls, 0) AS economy,
                  runs * 1.0 / NULLIF(wickets, 0) AS bowling_average,
                  balls * 1.0 / NULLIF(wickets, 0) AS bowling_sr,
                  dots * 100.0 / NULLIF(balls, 0) AS dot_pct,
                  (fours + sixes) * 100.0 / NULLIF(balls, 0) AS boundary_pct,
-                 wickets * 6.0 / NULLIF(balls, 0) AS wickets_per_over FROM agg"""
+                 wickets * 6.0 / NULLIF(balls, 0) AS wickets_per_over{bowl_phase_derived} FROM agg"""
         sql = f"""WITH agg AS ({agg}), stats AS ({derived}),
             filtered AS (SELECT * FROM stats WHERE balls >= {q.p(min_balls)}),
             scored AS (SELECT *, {score_sql} AS score FROM filtered)

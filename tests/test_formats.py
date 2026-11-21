@@ -106,3 +106,19 @@ def test_venue_profile_is_scoped(engine: Engine):
     odi = engine.venue_profile("wankhede", {"format": "ODI"})["venues"]
     assert men and men[0]["matches"] > 100
     assert not odi or odi[0]["avg_first_innings"] > men[0]["avg_first_innings"]
+
+
+def test_phase_metrics_match_phase_filter(engine: Engine):
+    base = {"competition": IPL, "last_n_seasons": 3}
+    a = engine.rank("bowl", players=["JJ Bumrah"], formula="death_economy", filters=base, min_balls=60)["rows"][0]
+    b = engine.rank("bowl", players=["JJ Bumrah"], formula="economy", filters={**base, "phase": "death"}, min_balls=20)["rows"][0]
+    assert a["death_economy"] == pytest.approx(b["economy"], abs=1e-6) and a["death_balls"] == b["balls"]
+
+
+def test_phase_metrics_in_custom_formula_and_sample_guard(engine: Engine):
+    r = engine.rank("bowl", role="death_bowler", filters={"competition": IPL, "last_n_seasons": 3},
+                    formula="0.5*z(death_economy) - 0.3*z(death_wickets) - 0.2*z(death_dot_pct)", limit=20)
+    assert r["rows"] and all(x["death_balls"] >= 12 for x in r["rows"])  # tiny samples drop out
+    bat = engine.rank("bat", role="finisher", filters={"competition": IPL, "last_n_seasons": 3},
+                      formula="death_strike_rate", limit=5)
+    assert bat["rows"] and bat["rows"][0]["death_strike_rate"] == bat["rows"][0]["score"]

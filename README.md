@@ -66,6 +66,7 @@ Change `format` to `"ODI"`, `gender` to `"female"` or `competition` to `"Big Bas
 
 Metrics (batting): `runs balls innings dismissals fours sixes strike_rate average boundary_pct dot_pct balls_per_dismissal runs_per_innings boundary_runs_pct`
 Metrics (bowling): `balls overs runs wickets economy bowling_average bowling_sr dot_pct boundary_pct wickets_per_over wides noballs`
+Phase metrics: prefix any of `balls strike_rate boundary_pct dot_pct` (batting) or `balls wickets economy dot_pct wickets_per_over` (bowling) with `pp_`, `mid_` or `death_` - e.g. `0.5*z(death_economy) - 0.3*z(death_wickets)`. They are blank (the player drops out) below 12 balls in that phase.
 Functions: `z(x)` z-score, `pctile(x)` percentile, `abs sqrt log min max round`, operators `+ - * / **`.
 
 Formulas are parsed with Python's `ast` and compiled to SQL from a whitelist - no raw user SQL ever reaches the database, and division is zero-safe.

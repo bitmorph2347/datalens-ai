@@ -87,7 +87,7 @@ TOOLS = [
          "formula": {"type": "string", "description": "metric or expression, e.g. strike_rate or 0.5*z(strike_rate)+0.5*z(average). "
                      "Batting metrics: runs, balls, innings, dismissals, fours, sixes, strike_rate, average, boundary_pct, dot_pct, "
                      "balls_per_dismissal, runs_per_innings, boundary_runs_pct. Bowling: balls, overs, runs, wickets, economy, "
-                     "bowling_average, bowling_sr, dot_pct, boundary_pct, wickets_per_over, wides, noballs. Functions: z(), pctile(), abs, sqrt, log, min, max."},
+                     "bowling_average, bowling_sr, dot_pct, boundary_pct, wickets_per_over, wides, noballs. Phase metrics use prefixes pp_ (powerplay), mid_ (middle), death_ (death overs), e.g. death_economy, death_wickets, death_dot_pct, pp_strike_rate, death_boundary_pct (blank below 12 balls). Functions: z(), pctile(), abs, sqrt, log, min, max."},
          "filters": FILTER_SCHEMA, "min_balls": {"type": "integer"}, "limit": {"type": "integer"},
          "order": {"type": "string", "enum": ["asc", "desc"]}}, "required": ["side"]}},
     {"name": "batter_vs_bowler_types",
