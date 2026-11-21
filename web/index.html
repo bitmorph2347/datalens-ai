@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataLens AI - Cricket Analytics</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">&#9678;</span> DataLens <b>AI</b> <small>cricket</small></div>
+  <nav id="tabs">
+    <button data-tab="chat" class="active">Ask</button>
+    <button data-tab="rank">Rankings</button>
+    <button data-tab="match">Matchups</button>
+    <button data-tab="venue">Venues</button>
+    <button data-tab="repl">Replacement</button>
+    <button data-tab="auction">Auction</button>
+    <button data-tab="data">My data</button>
+    <button data-tab="saved">Saved</button>
+  </nav>
+  <span id="status" class="pill"></span>
+</header>
+
+<main>
+<!-- ASK -->
+<section id="tab-chat" class="tab active">
+  <div class="card">
+    <div id="chatlog" class="chatlog"></div>
+    <form id="chatform" class="row">
+      <input id="chatin" placeholder="e.g. best middle order batters by strike rate since 2022" autocomplete="off">
+      <button class="primary">Ask</button>
+    </form>
+    <div class="chips" id="examples"></div>
+  </div>
+</section>
+
+<!-- RANKINGS -->
+<section id="tab-rank" class="tab">
+  <div class="card">
+    <h2>Rank players with your own rules</h2>
+    <div class="grid">
+      <label>Players<select id="r-side"><option value="bat">Batters</option><option value="bowl">Bowlers</option></select></label>
+      <label>Role<select id="r-role"></select></label>
+      <label>Formula<input id="r-formula" value="strike_rate" list="metric-list"></label>
+      <label>Order<select id="r-order"><option value="">auto</option><option value="desc">high is best</option><option value="asc">low is best</option></select></label>
+    </div>
+    <div class="chips" id="metric-chips"></div>
+    <details open><summary>Filters</summary>
+      <div class="grid" id="r-filters">
+        <label>Last N seasons<input id="f-last" type="number" min="1" placeholder="e.g. 3"></label>
+        <label>Season from<input id="f-from" type="number" placeholder="2008"></label>
+        <label>Season to<input id="f-to" type="number" placeholder="2026"></label>
+        <label>Phase<select id="f-phase"><option value="">any</option><option>powerplay</option><option>middle</option><option>death</option></select></label>
+        <label>Venue<select id="f-venue"></select></label>
+        <label>Team<select id="f-team"></select></label>
+        <label>Opposition<select id="f-opp"></select></label>
+        <label>Innings<select id="f-inn"><option value="">any</option><option value="1">batting first</option><option value="2">chasing</option></select></label>
+        <label>Vs bowler type<select id="f-kind"><option value="">any</option><option>pace</option><option>spin</option></select></label>
+        <label>Vs batter hand<select id="f-hand"><option value="">any</option><option value="L">left</option><option value="R">right</option></select></label>
+        <label>Min balls<input id="r-min" type="number" placeholder="auto"></label>
+        <label>Show top<input id="r-limit" type="number" value="15" min="1" max="200"></label>
+      </div>
+    </details>
+    <div class="row"><button class="primary" id="r-run">Rank</button><span class="hint">Formulas: <code>0.5*z(strike_rate)+0.5*z(average)</code> - <code>z()</code> standardises so different scales can be mixed.</span></div>
+  </div>
+  <div id="r-out"></div>
+</section>
+
+<!-- MATCHUPS -->
+<section id="tab-match" class="tab">
+  <div class="card">
+    <h2>Matchups</h2>
+    <div class="grid">
+      <label>Type<select id="m-kind">
+        <option value="batter_vs_types">Batter vs pace / spin</option>
+        <option value="bowler_vs_hands">Bowler vs left / right-handers</option>
+        <option value="head_to_head">Batter vs bowler</option>
+        <option value="opponents_bat">Batter: best &amp; worst bowlers</option>
+        <option value="opponents_bowl">Bowler: best &amp; worst batters</option></select></label>
+      <label id="m-a-l">Player<input id="m-a" list="players" autocomplete="off" placeholder="Virat Kohli"></label>
+      <label id="m-b-l" hidden>Bowler<input id="m-b" list="players" autocomplete="off" placeholder="Jasprit Bumrah"></label>
+      <label>Last N seasons<input id="m-last" type="number" placeholder="all"></label>
+    </div>
+    <button class="primary" id="m-run">Analyse</button>
+  </div>
+  <div id="m-out"></div>
+</section>
+
+<!-- VENUES -->
+<section id="tab-venue" class="tab">
+  <div class="card">
+    <h2>Venue &amp; conditions</h2>
+    <div class="grid">
+      <label>Venue<select id="v-venue"></select></label>
+      <label>Season from<input id="v-from" type="number" placeholder="2008"></label>
+    </div>
+    <button class="primary" id="v-run">Show</button>
+    <span class="hint">Also use the Venue filter in Rankings to find who performs best at a ground.</span>
+  </div>
+  <div id="v-out"></div>
+</section>
+
+<!-- REPLACEMENT -->
+<section id="tab-repl" class="tab">
+  <div class="card">
+    <h2>Replacement finder</h2>
+    <div class="grid">
+      <label>Player<input id="s-player" list="players" autocomplete="off" placeholder="Hardik Pandya"></label>
+      <label>Type<select id="s-side"><option value="bat">Batter</option><option value="bowl">Bowler</option></select></label>
+      <label>Max price (cr)<input id="s-price" type="number" step="0.25" placeholder="any"></label>
+      <label>Nationality<select id="s-nat"><option value="">any</option><option value="IND">Indian</option><option value="OS">Overseas</option></select></label>
+      <label>Last N seasons<input id="s-last" type="number" value="3"></label>
+      <label>How many<input id="s-n" type="number" value="8"></label>
+    </div>
+    <button class="primary" id="s-run">Find similar players</button>
+    <span class="hint">Prices come from the loaded price list (sample by default - see Auction tab).</span>
+  </div>
+  <div id="s-out"></div>
+</section>
+
+<!-- AUCTION -->
+<section id="tab-auction" class="tab">
+  <div class="card">
+    <h2>Auction planner</h2>
+    <p class="hint">1) List your current squad &rarr; 2) see role gaps &rarr; 3) get the best-value buys within your purse.</p>
+    <div class="grid2">
+      <label>Current squad (one name per line)<textarea id="a-squad" rows="8" placeholder="Virat Kohli&#10;Jasprit Bumrah&#10;..."></textarea></label>
+      <div>
+        <div class="grid">
+          <label>Purse (cr)<input id="a-purse" type="number" value="50" step="0.5"></label>
+          <label>Max overseas to buy<input id="a-os" type="number" value="2"></label>
+          <label>Last N seasons<input id="a-last" type="number" value="3"></label>
+        </div>
+        <label>Batting formula<input id="a-bf" placeholder="default: 0.5*z(strike_rate)+0.3*z(average)+0.2*z(boundary_pct)"></label>
+        <label>Bowling formula<input id="a-wf" placeholder="default: 0.5*z(wickets_per_over)-0.5*z(economy)"></label>
+      </div>
+    </div>
+    <h3>Roles to fill <small class="hint">(leave all as-is to use the gaps from your squad)</small></h3>
+    <div class="grid" id="a-slots"></div>
+    <div class="row">
+      <button id="a-gaps">1. Find gaps</button>
+      <button class="primary" id="a-run">2. Optimise squad</button>
+      <label class="inline">Price list <input type="file" id="a-file" accept=".csv"></label>
+      <span id="a-src" class="hint"></span>
+    </div>
+  </div>
+  <div id="a-out"></div>
+</section>
+
+<!-- MY DATA -->
+<section id="tab-data" class="tab">
+  <div class="card">
+    <h2>Upload your own dataset</h2>
+    <p class="hint">CSV or TSV up to 25 MB. We profile it, flag problems, clean it and let you query it with SQL.</p>
+    <input type="file" id="u-file" accept=".csv,.tsv,.txt"> <button class="primary" id="u-go">Upload</button>
+  </div>
+  <div id="u-out"></div>
+</section>
+
+<!-- SAVED -->
+<section id="tab-saved" class="tab">
+  <div class="card"><h2>Saved projects</h2><div id="saved-list"></div></div>
+</section>
+</main>
+
+<datalist id="players"></datalist>
+<datalist id="metric-list"></datalist>
+<footer>Data: <a href="https://cricsheet.org" target="_blank" rel="noopener">Cricsheet</a> IPL ball-by-ball. Roles and similarity are inferred from data - decision support, not a scouting verdict.</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
