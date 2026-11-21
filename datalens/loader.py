@@ -59,9 +59,11 @@ def parse_info(path: Path) -> tuple[dict, list[tuple[str, str]]]:
 
 def build(db_path: Path = config.DB_PATH) -> Path:
     download()
-    if db_path.exists():
-        db_path.unlink()
-    con = duckdb.connect(str(db_path))
+    # Build into a temp file and swap it in only on success, so a failed run never leaves a half-built database.
+    tmp_path = db_path.with_name(db_path.name + ".tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    con = duckdb.connect(str(tmp_path))
 
     # ---- matches + squads ----
     matches, squads = [], []
@@ -159,6 +161,7 @@ def build(db_path: Path = config.DB_PATH) -> Path:
         n = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
         print(f"{t}: {n} rows")
     con.close()
+    tmp_path.replace(db_path)
     return db_path
 
 

@@ -7,4 +7,5 @@ __pycache__/
 data/raw/
 data/*.duckdb
 data/*.duckdb.wal
+data/*.duckdb.tmp
 data/projects/

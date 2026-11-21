@@ -182,7 +182,11 @@ class Engine:
             raise FileNotFoundError(f"{db_path} not found. Run: python -m datalens.loader")
         self.con = duckdb.connect(str(db_path), read_only=True,
                                   config={"enable_external_access": False})
-        self.latest_season = self.con.execute("SELECT max(season) FROM balls").fetchone()[0]
+        try:
+            self.latest_season = self.con.execute("SELECT max(season) FROM balls").fetchone()[0]
+        except duckdb.CatalogException:
+            raise FileNotFoundError(f"{db_path} is incomplete (the data build did not finish). "
+                                    "Delete it and run: python -m datalens.loader") from None
         self.first_season = self.con.execute("SELECT min(season) FROM balls").fetchone()[0]
         self.players = [r[0] for r in self.con.execute(
             "SELECT DISTINCT p FROM (SELECT striker p FROM balls UNION SELECT bowler FROM balls) ORDER BY 1").fetchall()]
