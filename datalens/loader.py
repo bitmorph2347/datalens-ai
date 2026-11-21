@@ -1,6 +1,7 @@
 """Download Cricsheet IPL data and build the DuckDB analytics database."""
 from __future__ import annotations
 
+import argparse
 import csv
 import io
 import ssl
@@ -161,6 +162,30 @@ def build(db_path: Path = config.DB_PATH) -> Path:
     return db_path
 
 
-if __name__ == "__main__":
+def _match_count(db_path: Path) -> int | None:
+    if not db_path.exists():
+        return None
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+        n = con.execute("SELECT count(*) FROM matches").fetchone()[0]
+        con.close()
+        return n
+    except duckdb.Error:
+        return None
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(description="Build the DataLens AI database from Cricsheet IPL data.")
+    ap.add_argument("--update", action="store_true",
+                    help="re-download the latest Cricsheet data first (use after new matches have been played)")
+    args = ap.parse_args(argv)
+    before = _match_count(config.DB_PATH)
+    download(force=args.update)
     build()
-    sys.exit(0)
+    after = _match_count(config.DB_PATH)
+    if args.update and before is not None and after is not None:
+        print(f"Matches: {before} -> {after} ({after - before:+d}). Restart the app to see the new data.")
+
+
+if __name__ == "__main__":
+    main()

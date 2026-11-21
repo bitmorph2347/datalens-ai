@@ -45,6 +45,8 @@ python -m datalens.api           # http://127.0.0.1:8000
 pytest -q                        # 81 tests
 ```
 
+**Keeping data fresh:** the database is a snapshot. After more matches have been played, run `python -m datalens.loader --update` (re-downloads Cricsheet data, rebuilds the database, prints how many matches were added) and restart the app. Cricsheet publishes after matches finish, so there is no live-match data. New players need a row in `data/players_meta.csv` to appear in bowler-type / batter-hand filters.
+
 Optional: `export ANTHROPIC_API_KEY=...` to enable free-form chat (model via `DATALENS_MODEL`, default `claude-sonnet-5-5`).
 
 ## The headline example
