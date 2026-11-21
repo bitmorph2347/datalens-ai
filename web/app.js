@@ -304,7 +304,7 @@ const squadList = () => lines("#a-squad");
 /* tournament -> team -> squad */
 async function loadTeams() {
   const sel = $("#a-team"), c = scope().competition;
-  if (!c) { sel.innerHTML = '<option value="">Pick a competition in the sidebar</option>'; return; }
+  if (!c || c === "International") { sel.innerHTML = '<option value="">Choose a tournament first (e.g. IPL)</option>'; return; }
   try {
     const r = await api("/api/rosters/teams?" + new URLSearchParams(scope()));
     sel.innerHTML = '<option value="">(choose your team)</option>' + r.teams.map((t) => `<option value="${esc(t.team)}">${esc(t.team)} (${t.players})</option>`).join("");
@@ -312,7 +312,19 @@ async function loadTeams() {
     if (r.free_players.length && !$("#a-free").value) $("#a-free").value = r.free_players.join("\n");
   } catch (e) { sel.innerHTML = `<option value="">${esc(e.message)}</option>`; }
 }
-function refreshComp() { $("#a-comp").value = scope().competition || ""; loadTeams(); }
+function fillTournaments() {
+  const f = $("#sc-format").value, g = $("#sc-gender").value, cur = scope().competition || "";
+  const items = META.competitions.filter((c) => c.fmt === f && c.gender === g && c.competition !== "International").map((c) => c.competition);
+  $("#a-comp").innerHTML = '<option value="">Choose a tournament</option>' + items.map((i) => `<option value="${esc(i)}">${esc(i)}</option>`).join("");
+  $("#a-comp").value = items.includes(cur) ? cur : "";
+}
+function refreshComp() { fillTournaments(); loadTeams(); }
+$("#a-comp").onchange = () => {  // choosing a tournament here sets the sidebar scope too
+  $("#sc-comp").value = $("#a-comp").value;
+  try { localStorage.setItem("dl_scope", JSON.stringify(scope())); } catch (_) { /* ignore */ }
+  $("#a-squad").value = ""; $("#a-roster-note").textContent = "";
+  refreshComp();
+};
 ["#sc-format", "#sc-gender", "#sc-comp"].forEach((id) => $(id).addEventListener("change", refreshComp));
 $("#a-load").onclick = (e) => busy(e.target, async () => {
   const note = $("#a-roster-note");

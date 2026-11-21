@@ -132,9 +132,9 @@
 <section id="tab-auction" class="tab">
   <div class="card">
     <h2>Auction planner</h2>
-    <p class="hint">1) Pick the tournament (sidebar Competition) and your team &rarr; 2) load your squad and remove anyone you are releasing &rarr; 3) find gaps &rarr; 4) get the best-value buys from players <b>actually available</b> (not on other teams) within your purse.</p>
+    <p class="hint">1) Pick the tournament and your team &rarr; 2) load your squad and remove anyone you are releasing &rarr; 3) find gaps &rarr; 4) get the best-value buys from players <b>actually available</b> (not on other teams) within your purse.</p>
     <div class="grid">
-      <label>Tournament<input id="a-comp" disabled placeholder="set Competition in the sidebar"></label>
+      <label>Tournament<select id="a-comp"><option value="">Choose a tournament</option></select></label>
       <label>My team<select id="a-team"><option value="">Pick a competition in the sidebar</option></select></label>
       <label>&nbsp;<button id="a-load">Load squad</button></label>
     </div>
@@ -147,8 +147,8 @@
           <label>Max overseas to buy<input id="a-os" type="number" value="2"></label>
           <label>Last N seasons<input id="a-last" type="number" value="3"></label>
         </div>
-        <label>Batting formula<input id="a-bf" placeholder="default: 0.5*z(strike_rate)+0.3*z(average)+0.2*z(boundary_pct)"></label>
-        <label>Bowling formula<input id="a-wf" placeholder="default: 0.5*z(wickets_per_over)-0.5*z(economy)"></label>
+        <label>Batting formula<input id="a-bf" placeholder="leave empty to use the default"></label>
+        <label>Bowling formula<input id="a-wf" placeholder="leave empty to use the default"></label>
         <p class="hint">Here a <b>higher score is better</b>, so put a minus sign on metrics where lower is better (economy): <code>-0.5*z(death_economy)+0.3*z(death_wickets)+0.2*z(death_dot_pct)</code>. Leave a formula box empty to use the default.</p>
       </div>
     </div>
