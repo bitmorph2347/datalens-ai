@@ -13,7 +13,6 @@ BOWL_FEATURES = ["economy", "bowling_sr", "dot_pct", "boundary_pct", "pp_share",
 
 def feature_table(engine: Engine, side: str, f: Filters, min_balls: int) -> pd.DataFrame:
     q = _Q()
-    frm, to = engine._seasons(f)
     if side == "bat":
         sql = f"""
         SELECT b.striker AS player, sum(b.runs_off_bat) AS runs, sum(b.batter_faced::INT) AS balls,
@@ -27,7 +26,7 @@ def feature_table(engine: Engine, side: str, f: Filters, min_balls: int) -> pd.D
                sum(CASE WHEN pm.bowl_kind = 'spin' THEN b.runs_off_bat END) * 100.0 /
                    NULLIF(sum((pm.bowl_kind = 'spin' AND b.batter_faced)::INT), 0) AS sr_vs_spin
         FROM balls b LEFT JOIN players_meta pm ON pm.player = b.bowler
-        WHERE b.season BETWEEN {q.p(frm)} AND {q.p(to)}
+        WHERE {engine._scope(f, q)}
         GROUP BY b.striker HAVING sum(b.batter_faced::INT) >= {q.p(min_balls)}"""
         df = engine.query(sql, q.params)
         df["strike_rate"] = df.runs * 100.0 / df.balls
@@ -46,7 +45,7 @@ def feature_table(engine: Engine, side: str, f: Filters, min_balls: int) -> pd.D
            sum((b.legal_ball AND b.phase = 'death')::INT) * 1.0 / sum(b.legal_ball::INT) AS death_share,
            any_value(CASE pm.bowl_kind WHEN 'pace' THEN 1.0 WHEN 'spin' THEN 0.0 ELSE 0.5 END) AS is_pace
     FROM balls b LEFT JOIN players_meta pm ON pm.player = b.bowler
-    WHERE b.season BETWEEN {q.p(frm)} AND {q.p(to)}
+    WHERE {engine._scope(f, q)}
     GROUP BY b.bowler HAVING sum(b.legal_ball::INT) >= {q.p(min_balls)}"""
     df = engine.query(sql, q.params)
     df["economy"] = df.runs * 6.0 / df.balls
@@ -65,7 +64,7 @@ def similar_players(engine: Engine, player: str, side: str = "bat", n: int = 10,
     f = Filters.from_dict(filters)
     if not (f.last_n_seasons or f.season_from):
         f.last_n_seasons = 3
-    min_balls = min_balls or (100 if side == "bat" else 90)
+    min_balls = min_balls or ((100 if side == "bat" else 90) * (2 if f.format == "ODI" else 1))
     feats = feature_table(engine, side, f, min_balls)
     if player not in feats.index:
         raise ValueError(f"{player} has fewer than {min_balls} {'balls faced' if side == 'bat' else 'balls bowled'} "

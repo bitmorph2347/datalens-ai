@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import math
 import re
 
 TEAM_CANON = {
@@ -50,7 +51,32 @@ VENUE_RULES = [
     ("Wankhede Stadium, Mumbai", ["wankhede"]),
 ]
 
+# Competition names: merge renamed events so filters and lists stay tidy.
+COMPETITION_CANON = {
+    "NatWest T20 Blast": "Vitality Blast", "Vitality Blast Women": "Women's Vitality Blast",
+    "Ram Slam T20 Challenge": "CSA T20 Challenge", "CSA Pro20": "CSA T20 Challenge",
+    "HRV Twenty20": "Super Smash", "New Zealand Cricket Women's Twenty20": "Women's Super Smash",
+    "Women's T20 Challenge Match": "Women's T20 Challenge", "T20 Blaze": "Women's T20 Blaze",
+    "KFC T20 Big Bash League": "Big Bash League",
+}
+# Short names users type -> text matched against competition names
+COMPETITION_ALIASES = {
+    "ipl": "Indian Premier League", "bbl": "Big Bash League", "wbbl": "Women's Big Bash League",
+    "psl": "Pakistan Super League", "cpl": "Caribbean Premier League", "sa20": "SA20",
+    "ilt20": "International League T20", "mlc": "Major League Cricket", "lpl": "Lanka Premier League",
+    "bpl": "Bangladesh Premier League", "wpl": "Women's Premier League", "blast": "Vitality Blast",
+    "t20 blast": "Vitality Blast", "smat": "Syed Mushtaq Ali Trophy", "super smash": "Super Smash",
+    "international": "International", "internationals": "International", "t20i": "International",
+    "t20is": "International",
+}
+
 BOWL_KIND = {"RAP": "pace", "LAP": "pace", "OB": "spin", "LB": "spin", "SLA": "spin", "LCH": "spin"}
+
+
+def canon_competition(name: str | None) -> str:
+    if not name:
+        return "Unknown"
+    return COMPETITION_CANON.get(name, name)
 
 
 def canon_team(name: str | None) -> str | None:
@@ -99,9 +125,13 @@ class PlayerResolver:
         return score
 
     def search(self, query: str, limit: int = 5) -> list[tuple[str, float]]:
-        scored = [(p, self._score(query, p)) for p in self.players]
+        toks = [t for t in norm_text(query).split() if len(t) >= 3]
+        pool = [p for p in self.players if any(t in self._norm[p] for t in toks)] if toks else self.players
+        scored = [(p, self._score(query, p)) for p in pool]
+        if not any(sc >= 0.55 for _, sc in scored):  # typo? fall back to scanning everyone
+            scored = [(p, self._score(query, p)) for p in self.players]
         scored = [x for x in scored if x[1] >= 0.55]
-        scored.sort(key=lambda x: (-round(x[1], 2), -self._w.get(x[0], 0), x[0]))
+        scored.sort(key=lambda x: (-(round(x[1], 2) + 0.1 * math.log10(1 + self._w.get(x[0], 0))), x[0]))
         return scored[:limit]
 
     def resolve(self, query: str, threshold: float = 0.8) -> str | None:

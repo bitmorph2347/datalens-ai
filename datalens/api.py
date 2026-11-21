@@ -18,7 +18,7 @@ from . import budget, config, similarity
 from .chat import ChatAgent, safe_select
 from .engine import DEFAULT_TEMPLATE, Engine, records
 from .reports import render_report, to_csv
-from .uploads import UploadStore
+from .uploads import MAX_MB, UploadStore
 
 
 class RankReq(BaseModel):
@@ -76,6 +76,7 @@ class BudgetReq(BaseModel):
 class ChatReq(BaseModel):
     message: str
     history: list[dict] = Field(default_factory=list)
+    scope: dict = Field(default_factory=dict)
 
 
 class SqlReq(BaseModel):
@@ -124,6 +125,7 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None) -
     def meta():
         m = engine.meta()
         m["chat_mode"] = agent.mode
+        m["max_upload_mb"] = MAX_MB
         m["default_template"] = DEFAULT_TEMPLATE
         return m
 
@@ -154,8 +156,10 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None) -
         raise HTTPException(400, "Unknown matchup kind")
 
     @app.get("/api/venues")
-    def venues(venue: str | None = None, season_from: int | None = None, season_to: int | None = None):
-        f = {"season_from": season_from, "season_to": season_to}
+    def venues(venue: str | None = None, season_from: int | None = None, season_to: int | None = None,
+               format: str | None = None, gender: str | None = None, competition: str | None = None):
+        f = {"season_from": season_from, "season_to": season_to, "format": format, "gender": gender,
+             "competition": competition}
         return guard(engine.venue_profile, venue, f)
 
     @app.post("/api/similar")
@@ -166,7 +170,7 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None) -
             sel = pr if req.max_price is None else pr[pr.price_cr <= req.max_price]
             cands = sel.player.tolist()
         if req.active_only:
-            active = engine.active_players()
+            active = engine.active_players(req.filters)
             cands = [p for p in (cands if cands is not None else engine.players) if p in active]
         res = guard(similarity.similar_players, engine, req.player, req.side, n=req.n, filters=req.filters,
                     weights=req.weights or None, candidates=cands, nationality=req.nationality, exclude=req.exclude)
@@ -219,7 +223,7 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None) -
     # ---------------------------------------------------------------- chat
     @app.post("/api/chat")
     def chat(req: ChatReq):
-        return guard(agent.ask, req.message, req.history)
+        return guard(agent.ask, req.message, req.history, req.scope)
 
     @app.post("/api/sql")
     def run_sql(req: SqlReq):
@@ -328,5 +332,6 @@ def get_app() -> FastAPI:  # for `uvicorn datalens.api:get_app --factory`
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(create_app(), host="127.0.0.1", port=8000)
+    uvicorn.run(create_app(), host="127.0.0.1", port=int(os.environ.get("PORT", "8000")))

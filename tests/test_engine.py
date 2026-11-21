@@ -3,10 +3,12 @@ import pytest
 
 from datalens.engine import Engine, Filters
 
+IPL = "Indian Premier League"
+
 
 def test_data_loaded(engine: Engine):
     m = engine.meta()["counts"]
-    assert m["matches"] > 1200 and m["balls"] > 290_000
+    assert m["matches"] > 15_000 and m["balls"] > 4_500_000
 
 
 def test_every_innings_has_two_openers(engine: Engine):
@@ -16,33 +18,33 @@ def test_every_innings_has_two_openers(engine: Engine):
 
 
 def test_kohli_is_top_run_scorer(engine: Engine):
-    r = engine.rank("bat", formula="runs", min_balls=1000, limit=1)
+    r = engine.rank("bat", formula="runs", min_balls=1000, limit=1, filters={"competition": IPL})
     assert r["rows"][0]["player"] == "V Kohli"
 
 
 def test_strike_rate_matches_independent_calculation(engine: Engine):
-    r = engine.rank("bat", formula="strike_rate", players=["V Kohli"], min_balls=100)
+    r = engine.rank("bat", formula="strike_rate", players=["V Kohli"], min_balls=100, filters={"competition": IPL})
     row = r["rows"][0]
     df = engine.query("""SELECT sum(runs_off_bat) runs, count(*) FILTER (WHERE wides = 0) balls
-                         FROM balls WHERE striker = 'V Kohli'""")
+                         FROM balls WHERE striker = 'V Kohli' AND competition = 'Indian Premier League'""")
     assert row["runs"] == df.runs[0] and row["balls"] == df.balls[0]
     assert row["strike_rate"] == pytest.approx(df.runs[0] * 100 / df.balls[0], abs=0.01)
 
 
 def test_bowler_economy_excludes_byes_and_legbyes(engine: Engine):
-    r = engine.rank("bowl", formula="economy", players=["JJ Bumrah"], min_balls=100)
+    r = engine.rank("bowl", formula="economy", players=["JJ Bumrah"], min_balls=100, filters={"competition": IPL})
     row = r["rows"][0]
     df = engine.query("""SELECT sum(runs_off_bat + wides + noballs) runs,
                          count(*) FILTER (WHERE wides = 0 AND noballs = 0) legal
-                         FROM balls WHERE bowler = 'JJ Bumrah'""")
+                         FROM balls WHERE bowler = 'JJ Bumrah' AND competition = 'Indian Premier League'""")
     assert row["runs"] == df.runs[0] and row["balls"] == df.legal[0]
 
 
 # ---- the RR-hackathon requirement: role filters keep openers out of middle-order lists
 def test_middle_order_list_contains_no_openers(engine: Engine):
-    f = {"last_n_seasons": 3}
+    f = {"last_n_seasons": 3, "competition": IPL}
     mid = engine.rank("bat", role="middle_order", filters=f, formula="strike_rate", min_balls=150, limit=50)
-    roles = engine.batting_roles(Filters(last_n_seasons=3)).set_index("player")
+    roles = engine.batting_roles(Filters(last_n_seasons=3, competition=IPL)).set_index("player")
     assert mid["rows"], "expected some middle-order batters"
     for row in mid["rows"]:
         assert roles.loc[row["player"], "share_middle_order"] >= 0.6
@@ -50,14 +52,14 @@ def test_middle_order_list_contains_no_openers(engine: Engine):
 
 
 def test_openers_list_has_openers_only(engine: Engine):
-    op = engine.rank("bat", role="opener", filters={"last_n_seasons": 3}, formula="strike_rate", limit=50)
+    op = engine.rank("bat", role="opener", filters={"last_n_seasons": 3, "competition": IPL}, formula="strike_rate", limit=50)
     names = [r["player"] for r in op["rows"]]
     assert "V Kohli" in names or "Shubman Gill" in names
     assert "MS Dhoni" not in names
 
 
 def test_death_bowler_role_and_phase(engine: Engine):
-    r = engine.rank("bowl", role="death_bowler", filters={"last_n_seasons": 3, "phase": "death"},
+    r = engine.rank("bowl", role="death_bowler", filters={"last_n_seasons": 3, "phase": "death", "competition": IPL},
                     formula="economy", min_balls=80, limit=10)
     assert r["rows"][0]["player"] == "JJ Bumrah"
     econ = [x["economy"] for x in r["rows"]]
@@ -65,13 +67,13 @@ def test_death_bowler_role_and_phase(engine: Engine):
 
 
 def test_powerplay_bowler_filter_is_phase_aware(engine: Engine):
-    r = engine.rank("bowl", role="powerplay_bowler", filters={"last_n_seasons": 3, "phase": "powerplay"}, limit=40)
+    r = engine.rank("bowl", role="powerplay_bowler", filters={"last_n_seasons": 3, "phase": "powerplay", "competition": IPL}, limit=40)
     assert len(r["rows"]) > 10
     assert all(x["balls"] >= 60 for x in r["rows"])
 
 
 def test_custom_formula_zscore_is_centred(engine: Engine):
-    r = engine.rank("bat", formula="0.5*z(strike_rate)+0.5*z(average)", filters={"last_n_seasons": 3}, limit=200)
+    r = engine.rank("bat", formula="0.5*z(strike_rate)+0.5*z(average)", filters={"last_n_seasons": 3, "competition": IPL}, limit=200)
     scores = [x["score"] for x in r["rows"]]
     assert abs(sum(scores) / len(scores)) < 0.35  # roughly centred (nulls drop some rows)
 
@@ -93,14 +95,15 @@ def test_min_balls_guard(engine: Engine):
 
 def test_head_to_head_matches_sql(engine: Engine):
     h = engine.head_to_head("kohli", "bumrah")
-    n = engine.query("SELECT count(*) FILTER (WHERE wides = 0) c FROM balls WHERE striker='V Kohli' AND bowler='JJ Bumrah'").c[0]
+    n = engine.query("SELECT count(*) FILTER (WHERE wides = 0) c FROM balls WHERE striker='V Kohli' AND bowler='JJ Bumrah' AND fmt='T20' AND gender='male'").c[0]
     assert h["total"]["balls"] == n and h["batter"] == "V Kohli"
 
 
 def test_pace_spin_split_sums_to_total(engine: Engine):
-    r = engine.batter_vs_bowler_types("V Kohli", {"last_n_seasons": 3})
+    r = engine.batter_vs_bowler_types("V Kohli", {"last_n_seasons": 3, "competition": IPL})
     total = sum(x["balls"] for x in r["by_kind"])
-    n = engine.query("SELECT count(*) FILTER (WHERE wides = 0) c FROM balls WHERE striker='V Kohli' AND season >= 2024").c[0]
+    lo = engine.query("SELECT max(season) m FROM balls WHERE competition = 'Indian Premier League'").m[0] - 2
+    n = engine.query(f"SELECT count(*) FILTER (WHERE wides = 0) c FROM balls WHERE striker='V Kohli' AND season >= {lo} AND competition = 'Indian Premier League'").c[0]
     assert total == n
 
 
@@ -129,7 +132,8 @@ def test_team_names_canonicalised(engine: Engine):
 
 def test_name_resolution_prefers_famous_player(engine: Engine):
     assert engine.resolve_player("kohli") == "V Kohli"
-    assert engine.resolve_player("Rohit Sharma") == "RG Sharma"
+    assert engine.resolve_player_nl("Rohit Sharma") == "RG Sharma"  # not the namesake
+    assert engine.resolve_player("RG Sharma") == "RG Sharma"        # exact Cricsheet names are respected
     assert engine.resolve_player("dhoni") == "MS Dhoni"
     with pytest.raises(ValueError):
         engine.resolve_player("zzzzqqqq")

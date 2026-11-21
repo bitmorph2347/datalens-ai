@@ -8,20 +8,28 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 </head>
 <body>
-<header>
-  <div class="brand"><span class="logo">&#9678;</span> DataLens <b>AI</b> <small>cricket</small></div>
+<div class="app">
+<aside class="side">
+  <div class="brand"><span class="logo">&#9678;</span><div>DataLens <b>AI</b><small>cricket analytics</small></div></div>
+  <div class="scope">
+    <div class="scope-title">Scope</div>
+    <label>Format<select id="sc-format"><option value="T20">T20</option><option value="ODI">ODI</option></select></label>
+    <label>Players<select id="sc-gender"><option value="male">Men</option><option value="female">Women</option></select></label>
+    <label>Competition<input id="sc-comp" list="comp-list" placeholder="All (e.g. IPL, BBL)" autocomplete="off"></label>
+  </div>
   <nav id="tabs">
-    <button data-tab="chat" class="active">Ask</button>
-    <button data-tab="rank">Rankings</button>
-    <button data-tab="match">Matchups</button>
-    <button data-tab="venue">Venues</button>
-    <button data-tab="repl">Replacement</button>
-    <button data-tab="auction">Auction</button>
-    <button data-tab="data">My data</button>
-    <button data-tab="saved">Saved</button>
+    <button data-tab="chat" class="active"><i>&#128172;</i>Ask</button>
+    <button data-tab="rank"><i>&#127942;</i>Rankings</button>
+    <button data-tab="match"><i>&#9876;</i>Matchups</button>
+    <button data-tab="venue"><i>&#127967;</i>Venues</button>
+    <button data-tab="repl"><i>&#128260;</i>Replacement</button>
+    <button data-tab="auction"><i>&#128176;</i>Auction</button>
+    <button data-tab="data"><i>&#128193;</i>My data</button>
+    <button data-tab="saved"><i>&#11088;</i>Saved</button>
   </nav>
   <span id="status" class="pill"></span>
-</header>
+</aside>
+<div class="content">
 
 <main>
 <!-- ASK -->
@@ -50,12 +58,12 @@
     <details open><summary>Filters</summary>
       <div class="grid" id="r-filters">
         <label>Last N seasons<input id="f-last" type="number" min="1" placeholder="e.g. 3"></label>
-        <label>Season from<input id="f-from" type="number" placeholder="2008"></label>
-        <label>Season to<input id="f-to" type="number" placeholder="2026"></label>
+        <label>Season from<input id="f-from" type="number" placeholder="any"></label>
+        <label>Season to<input id="f-to" type="number" placeholder="any"></label>
         <label>Phase<select id="f-phase"><option value="">any</option><option>powerplay</option><option>middle</option><option>death</option></select></label>
-        <label>Venue<select id="f-venue"></select></label>
-        <label>Team<select id="f-team"></select></label>
-        <label>Opposition<select id="f-opp"></select></label>
+        <label>Venue<input id="f-venue" list="venue-list" placeholder="any" autocomplete="off"></label>
+        <label>Team<input id="f-team" list="team-list" placeholder="any" autocomplete="off"></label>
+        <label>Opposition<input id="f-opp" list="team-list" placeholder="any" autocomplete="off"></label>
         <label>Innings<select id="f-inn"><option value="">any</option><option value="1">batting first</option><option value="2">chasing</option></select></label>
         <label>Vs bowler type<select id="f-kind"><option value="">any</option><option>pace</option><option>spin</option></select></label>
         <label>Vs batter hand<select id="f-hand"><option value="">any</option><option value="L">left</option><option value="R">right</option></select></label>
@@ -93,8 +101,8 @@
   <div class="card">
     <h2>Venue &amp; conditions</h2>
     <div class="grid">
-      <label>Venue<select id="v-venue"></select></label>
-      <label>Season from<input id="v-from" type="number" placeholder="2008"></label>
+      <label>Venue<input id="v-venue" list="venue-list" placeholder="All venues" autocomplete="off"></label>
+      <label>Season from<input id="v-from" type="number" placeholder="any"></label>
     </div>
     <button class="primary" id="v-run">Show</button>
     <span class="hint">Also use the Venue filter in Rankings to find who performs best at a ground.</span>
@@ -153,7 +161,7 @@
 <section id="tab-data" class="tab">
   <div class="card">
     <h2>Upload your own dataset</h2>
-    <p class="hint">CSV or TSV up to 25 MB. We profile it, flag problems, clean it and let you query it with SQL.</p>
+    <p class="hint">CSV or TSV up to <span id="max-mb">200</span> MB. We profile it, flag problems, clean it and let you query it with SQL.</p>
     <input type="file" id="u-file" accept=".csv,.tsv,.txt"> <button class="primary" id="u-go">Upload</button>
   </div>
   <div id="u-out"></div>
@@ -164,10 +172,14 @@
   <div class="card"><h2>Saved projects</h2><div id="saved-list"></div></div>
 </section>
 </main>
+<footer>Data: <a href="https://cricsheet.org" target="_blank" rel="noopener">Cricsheet</a> ball-by-ball data. Roles and similarity are inferred from data - decision support, not a scouting verdict.</footer>
+</div></div>
 
 <datalist id="players"></datalist>
+<datalist id="venue-list"></datalist>
+<datalist id="team-list"></datalist>
+<datalist id="comp-list"></datalist>
 <datalist id="metric-list"></datalist>
-<footer>Data: <a href="https://cricsheet.org" target="_blank" rel="noopener">Cricsheet</a> IPL ball-by-ball. Roles and similarity are inferred from data - decision support, not a scouting verdict.</footer>
 <script src="/static/app.js"></script>
 </body>
 </html>

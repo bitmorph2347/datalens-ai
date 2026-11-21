@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field, asdict, fields
+from dataclasses import dataclass, field, asdict, fields, replace
 from pathlib import Path
 
 import duckdb
@@ -11,7 +11,7 @@ import pandas as pd
 
 from . import config
 from .formula import FormulaError, compile_formula
-from .names import PlayerResolver, canon_team, canon_venue
+from .names import COMPETITION_ALIASES, PlayerResolver, canon_team, canon_venue
 
 # ------------------------------------------------------------------ metrics
 BAT_METRICS = {
@@ -35,16 +35,19 @@ BAT_ROLES = {
     "opener": "Usually bats at 1-2",
     "top_order": "Usually bats at 1-3",
     "middle_order": "Usually bats at 4-6",
-    "finisher": "Bats 4-7 and faces a large share of balls in overs 16-20",
+    "finisher": "Bats 4-7 and faces a large share of balls in the death overs (T20: 16-20, ODI: 41-50)",
     "lower_order": "Usually bats at 7 or lower",
 }
 BOWL_ROLES = {
-    "powerplay_bowler": "Bowls at least 40% of their balls in overs 1-6",
-    "middle_overs_bowler": "Bowls at least 50% of their balls in overs 7-15",
-    "death_bowler": "Bowls at least 30% of their balls in overs 16-20",
+    "powerplay_bowler": "Bowls a large share of balls in the powerplay (T20: overs 1-6, ODI: 1-10)",
+    "middle_overs_bowler": "Bowls mostly in the middle overs (T20: 7-15, ODI: 11-40)",
+    "death_bowler": "Bowls a large share of balls in the death overs (T20: 16-20, ODI: 41-50)",
     "pacer": "Fast / medium bowler (needs players_meta)",
     "spinner": "Spin bowler (needs players_meta)",
 }
+# minimum share of a bowler's balls in the phase to earn the role, per format
+BOWL_SHARE = {"T20": {"powerplay": 0.4, "middle": 0.5, "death": 0.3},
+              "ODI": {"powerplay": 0.3, "middle": 0.6, "death": 0.25}}
 ROLE_ALIASES = {
     "opening": "opener", "openers": "opener", "top": "top_order", "top order": "top_order",
     "middle": "middle_order", "middle order": "middle_order", "finishers": "finisher",
@@ -83,6 +86,10 @@ class Filters:
     batter_hand: str | None = None   # L | R         (bowling queries)
     pos_min: int | None = None
     pos_max: int | None = None
+    format: str = "T20"             # T20 | ODI  (phases and roles differ, so stats are never mixed)
+    gender: str = "male"            # male | female
+    competition: str | None = None  # e.g. 'Indian Premier League', 'International', or a short alias like 'ipl'
+    team_type: str | None = None    # international | club
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "Filters":
@@ -106,6 +113,31 @@ class Filters:
             d["batter_hand"] = str(d["batter_hand"]).upper()[:1]
             if d["batter_hand"] not in ("L", "R"):
                 raise ValueError("batter_hand must be 'L' or 'R'")
+        if d.get("format"):
+            fm = str(d["format"]).lower().replace("-", "").replace(" ", "")
+            if fm in ("t20i", "it20", "t20internationals"):
+                d["format"], d.setdefault("team_type", "international")
+            elif fm in ("t20",):
+                d["format"] = "T20"
+            elif fm in ("odi", "odis", "oneday", "50over"):
+                d["format"] = "ODI"
+            else:
+                raise ValueError("format must be 'T20' or 'ODI'")
+            if fm in ("t20i", "it20", "t20internationals"):
+                d["format"] = "T20"
+        if d.get("gender"):
+            g = str(d["gender"]).lower().replace("'", "").strip()
+            if g in ("male", "m", "men", "mens", "man"):
+                d["gender"] = "male"
+            elif g in ("female", "f", "women", "womens", "woman"):
+                d["gender"] = "female"
+            else:
+                raise ValueError("gender must be 'male' or 'female'")
+        if d.get("team_type") and d["team_type"] not in ("international", "club"):
+            raise ValueError("team_type must be 'international' or 'club'")
+        if d.get("competition"):
+            c = str(d["competition"]).strip()
+            d["competition"] = COMPETITION_ALIASES.get(c.lower(), c)
         if d.get("innings") not in (None, 1, 2):
             raise ValueError("innings must be 1 or 2")
         if d.get("team"):
@@ -116,8 +148,17 @@ class Filters:
             d["venue"] = canon_venue(d["venue"])
         return cls(**d)
 
+    def role_window(self) -> "Filters":
+        """The part of the filters that decides who counts as a given role (scope + seasons only)."""
+        return Filters(season_from=self.season_from, season_to=self.season_to, last_n_seasons=self.last_n_seasons,
+                       format=self.format, gender=self.gender, competition=self.competition, team_type=self.team_type)
+
     def describe(self) -> str:
-        bits = []
+        bits = [self.format, "women's" if self.gender == "female" else "men's"]
+        if self.competition:
+            bits.append(self.competition)
+        if self.team_type:
+            bits.append(self.team_type)
         if self.last_n_seasons:
             bits.append(f"last {self.last_n_seasons} seasons" + (f" up to {self.season_to}" if self.season_to else ""))
         elif self.season_from or self.season_to:
@@ -140,7 +181,7 @@ class Filters:
             bits.append(f"vs {'left' if self.batter_hand == 'L' else 'right'}-handed batters")
         if self.pos_min or self.pos_max:
             bits.append(f"batting position {self.pos_min or 1}-{self.pos_max or 11}")
-        return ", ".join(bits) or "all IPL data"
+        return ", ".join(bits)
 
 
 class _Q:
@@ -193,6 +234,10 @@ class Engine:
         w = self.con.execute("""SELECT p, count(*) FROM (SELECT striker p FROM balls WHERE season >= 2018
                                 UNION ALL SELECT bowler FROM balls WHERE season >= 2018) GROUP BY p""").fetchall()
         self.resolver = PlayerResolver(self.players, {p: n for p, n in w})
+        self._comps = {r[0].lower() for r in self.con.execute("SELECT DISTINCT competition FROM matches").fetchall()}
+        self._bounds: dict = {}
+        self.venue_names = [r[0] for r in self.con.execute(
+            "SELECT venue FROM matches GROUP BY venue HAVING count(*) >= 15 ORDER BY count(*) DESC").fetchall()]
         self._player_set = set(self.players)
 
     # ---- low-level -------------------------------------------------
@@ -205,15 +250,37 @@ class Engine:
         finally:
             cur.close()
 
+    def _scope(self, f: Filters, q: "_Q", with_season: bool = True) -> str:
+        """SQL condition for format / gender / competition (and the season window). Columns are unqualified."""
+        c = [f"fmt = {q.p(f.format)}", f"gender = {q.p(f.gender)}"]
+        if f.competition:
+            low = f.competition.lower()
+            c.append(f"lower(competition) = {q.p(low)}" if low in self._comps else f"lower(competition) LIKE {q.p('%' + low + '%')}")
+        if f.team_type:
+            c.append(f"team_type = {q.p(f.team_type)}")
+        if with_season:
+            frm, to = self._seasons(f)
+            c.append(f"season BETWEEN {q.p(frm)} AND {q.p(to)}")
+        return " AND ".join(c)
+
     def _seasons(self, f: Filters) -> tuple[int, int]:
-        to = f.season_to or self.latest_season
-        frm = f.season_from or self.first_season
+        key = (f.format, f.gender, f.competition, f.team_type)
+        if key not in self._bounds:
+            q = _Q()
+            df = self.query(f"SELECT min(season) a, max(season) b FROM balls WHERE {self._scope(f, q, with_season=False)}", q.params)
+            a, b = df["a"][0], df["b"][0]
+            self._bounds[key] = (self.first_season, self.latest_season) if pd.isna(a) else (int(a), int(b))
+        first, latest = self._bounds[key]
+        to = min(f.season_to or latest, latest)
+        frm = max(f.season_from or first, first)
         if f.last_n_seasons:
             frm = max(frm, to - f.last_n_seasons + 1)
         return frm, to
 
-    def resolve_player(self, name: str) -> str:
-        if name in self._player_set:
+    def resolve_player(self, name: str, prefer_famous: bool = False) -> str:
+        """Map free text to a Cricsheet name. An exact Cricsheet name wins, unless prefer_famous is set
+        (natural-language questions): then 'Rohit Sharma' resolves to the far more active 'RG Sharma'."""
+        if name in self._player_set and not prefer_famous:
             return name
         hit = self.resolver.resolve(name, threshold=0.75)
         if not hit:
@@ -221,14 +288,23 @@ class Engine:
             raise ValueError(f"Player '{name}' not found." + (f" Did you mean: {', '.join(sugg)}?" if sugg else ""))
         return hit
 
+    def resolve_player_nl(self, name: str) -> str:
+        return self.resolve_player(name, prefer_famous=True)
+
     # ---- metadata ----------------------------------------------------
     def meta(self) -> dict:
         teams = [r[0] for r in self.query(
-            "SELECT DISTINCT batting_team FROM balls ORDER BY 1").values]
+            """SELECT t FROM (SELECT team1 t FROM matches UNION ALL SELECT team2 FROM matches)
+               GROUP BY t HAVING count(*) >= 20 ORDER BY count(*) DESC""").values]
         venues = [r[0] for r in self.query(
-            "SELECT venue FROM matches GROUP BY venue HAVING count(*) >= 3 ORDER BY count(*) DESC").values]
+            "SELECT venue FROM matches GROUP BY venue HAVING count(*) >= 15 ORDER BY count(*) DESC").values]
+        comps = self.query("""SELECT competition, fmt, gender, count(*) AS matches, min(season) AS first_season,
+                              max(season) AS last_season FROM matches GROUP BY ALL HAVING count(*) >= 10
+                              ORDER BY matches DESC""")
         return {
             "seasons": [self.first_season, self.latest_season], "teams": teams, "venues": venues,
+            "formats": ["T20", "ODI"], "genders": ["male", "female"], "competitions": records(comps),
+            "phase_overs": {k: {p: [lo + 1, hi + 1] for p, (lo, hi) in v.items()} for k, v in config.PHASES.items()},
             "bat_metrics": BAT_METRICS, "bowl_metrics": BOWL_METRICS,
             "bat_roles": BAT_ROLES, "bowl_roles": BOWL_ROLES, "phases": list(PHASES),
             "formula_functions": {"z(x)": "z-score of x across the ranked players",
@@ -241,11 +317,15 @@ class Engine:
             },
         }
 
-    def active_players(self, since: int | None = None) -> set[str]:
-        """Players who batted or bowled in season >= since (default: the latest season in the data)."""
-        since = since or self.latest_season
-        df = self.query(f"""SELECT striker AS p FROM balls WHERE season >= {int(since)}
-                            UNION SELECT bowler FROM balls WHERE season >= {int(since)}""")
+    def active_players(self, filters: dict | Filters | None = None) -> set[str]:
+        """Players who batted or bowled in the latest season of the given scope (format/gender/competition)."""
+        f = filters if isinstance(filters, Filters) else Filters.from_dict(filters)
+        _, latest = self._seasons(f)
+        g = Filters(format=f.format, gender=f.gender, competition=f.competition, team_type=f.team_type,
+                    season_from=latest, season_to=latest)
+        q = _Q()
+        cond = self._scope(g, q)
+        df = self.query(f"SELECT striker AS p FROM balls WHERE {cond} UNION SELECT bowler FROM balls WHERE {cond}", q.params)
         return set(df["p"])
 
     def search_players(self, q: str, limit: int = 8) -> list[dict]:
@@ -261,9 +341,9 @@ class Engine:
         WITH inn AS (
           SELECT striker AS player, match_id, innings, min(striker_pos) AS pos,
                  sum(batter_faced::INT) AS faced,
-                 sum((batter_faced AND over >= 15)::INT) AS faced_death,
-                 sum((batter_faced AND over < 6)::INT) AS faced_pp
-          FROM balls WHERE season BETWEEN {q.p(frm)} AND {q.p(to)} GROUP BY ALL)
+                 sum((batter_faced AND phase = 'death')::INT) AS faced_death,
+                 sum((batter_faced AND phase = 'powerplay')::INT) AS faced_pp
+          FROM balls WHERE {self._scope(f, q)} GROUP BY ALL)
         SELECT player, count(*) AS role_innings, sum(faced) AS role_balls,
                avg((pos <= 2)::INT) AS share_opener, avg((pos <= 3)::INT) AS share_top_order,
                avg((pos BETWEEN 4 AND 6)::INT) AS share_middle_order,
@@ -293,13 +373,14 @@ class Engine:
                sum((legal_ball AND phase = 'death')::INT) * 1.0 / sum(legal_ball::INT) AS death_share,
                pm.bowl_kind, pm.bowl_style
         FROM balls b LEFT JOIN players_meta pm ON pm.player = b.bowler
-        WHERE b.season BETWEEN {q.p(frm)} AND {q.p(to)}
+        WHERE {self._scope(f, q)}
         GROUP BY b.bowler, pm.bowl_kind, pm.bowl_style
         HAVING sum(legal_ball::INT) >= {q.p(min_balls)}"""
         df = self.query(sql, q.params)
-        t_pp = role_min_share or 0.4
-        t_mid = role_min_share or 0.5
-        t_death = role_min_share or 0.3
+        th = BOWL_SHARE[f.format]
+        t_pp = role_min_share or th["powerplay"]
+        t_mid = role_min_share or th["middle"]
+        t_death = role_min_share or th["death"]
         df["role_powerplay_bowler"] = df.pp_share >= t_pp
         df["role_middle_overs_bowler"] = df.middle_share >= t_mid
         df["role_death_bowler"] = df.death_share >= t_death
@@ -315,7 +396,7 @@ class Engine:
         joins = ["balls b"]
         where = []
         frm, to = self._seasons(f)
-        where.append(f"b.season BETWEEN {q.p(frm)} AND {q.p(to)}")
+        where.append(self._scope(f, q))
         if f.venue:
             where.append(f"b.venue = {q.p(f.venue)}")
         if f.innings:
@@ -364,14 +445,15 @@ class Engine:
         if min_balls is None:
             restricted = bool(f.phase or f.bowler_kind or f.bowler_style or f.venue or f.opposition
                               or f.batter_hand or f.team or f.innings or f.pos_min or f.pos_max)
-            min_balls = (60 if restricted else 150) if side == "bat" else (60 if restricted else 120)
+            scale = 2 if (f.format == "ODI" and not restricted) else 1
+            min_balls = scale * ((60 if restricted else 150) if side == "bat" else (60 if restricted else 120))
 
         warnings: list[str] = []
         role = norm_role(role)
         role_tags_info = None
         allowed: list[str] | None = None
         if role:
-            rf = role_filters or Filters(season_from=f.season_from, season_to=f.season_to, last_n_seasons=f.last_n_seasons)
+            rf = role_filters or f.role_window()
             if side == "bat":
                 if role not in BAT_ROLES:
                     raise ValueError(f"Unknown batting role '{role}'. Options: {', '.join(BAT_ROLES)}")
@@ -436,6 +518,9 @@ class Engine:
           ORDER BY s.score {order.upper()} NULLS LAST, s.balls DESC LIMIT {q.p(limit)}"""
         df = self.query(sql, q.params)
         df.insert(0, "rank", range(1, len(df) + 1))
+        if not len(df):
+            warnings.append("No players matched these filters. If the scope looks right, the loaded database may not "
+                            "include it (a `--scope ipl` build has men's T20 IPL data only).")
         if len(df):
             small = df["balls"] < 1.5 * min_balls
             df["small_sample"] = small
@@ -461,7 +546,7 @@ class Engine:
                                    avg(CASE WHEN pt.bat_hand IS NOT NULL THEN 1 ELSE 0 END) AS bat_known
             FROM balls b LEFT JOIN players_meta pm ON pm.player = b.bowler
                          LEFT JOIN players_meta pt ON pt.player = b.striker
-            WHERE b.season BETWEEN {q.p(frm)} AND {q.p(to)}""", q.params)
+            WHERE {self._scope(f, q)}""", q.params)
         if f.batter_hand:
             return f"Batting-hand data covers {df['bat_known'][0] * 100:.0f}% of deliveries in this window; others are excluded."
         return f"Bowling-style data covers {df['bowl_known'][0] * 100:.0f}% of deliveries in this window; others are excluded."
@@ -479,7 +564,7 @@ class Engine:
                sum((b.is_boundary)::INT) AS boundaries,
                sum((b.batter_faced AND b.runs_off_bat = 0)::INT) AS dots
         FROM balls b LEFT JOIN players_meta pm ON pm.player = b.bowler
-        WHERE b.striker = {q.p(batter)} AND b.season BETWEEN {q.p(frm)} AND {q.p(to)}{extra}
+        WHERE b.striker = {q.p(batter)} AND {self._scope(f, q)}{extra}
         GROUP BY ALL HAVING sum(b.batter_faced::INT) > 0 ORDER BY balls DESC"""
         df = self.query(sql, q.params)
         df["strike_rate"] = df.runs * 100.0 / df.balls
@@ -508,7 +593,7 @@ class Engine:
                sum(b.legal_ball::INT) AS balls, sum(b.runs_conceded) AS runs, sum(b.bowler_wicket::INT) AS wickets,
                sum((b.legal_ball AND b.runs_conceded = 0)::INT) AS dots, sum(b.is_boundary::INT) AS boundaries
         FROM balls b LEFT JOIN players_meta pm ON pm.player = b.striker
-        WHERE b.bowler = {q.p(bowler)} AND b.season BETWEEN {q.p(frm)} AND {q.p(to)}
+        WHERE b.bowler = {q.p(bowler)} AND {self._scope(f, q)}
         GROUP BY ALL HAVING sum(b.legal_ball::INT) > 0 ORDER BY balls DESC"""
         df = self.query(sql, q.params)
         df["economy"] = df.runs * 6.0 / df.balls
@@ -527,7 +612,7 @@ class Engine:
                sum(b.striker_out::INT) AS dismissals, sum(b.is_boundary::INT) AS boundaries,
                sum((b.batter_faced AND b.runs_off_bat = 0)::INT) AS dots
         FROM balls b WHERE b.striker = {q.p(batter)} AND b.bowler = {q.p(bowler)}
-          AND b.season BETWEEN {q.p(frm)} AND {q.p(to)} GROUP BY b.season ORDER BY b.season"""
+          AND {self._scope(f, q)} GROUP BY b.season ORDER BY b.season"""
         df = self.query(sql, q.params)
         tot = {"runs": int(df.runs.sum()), "balls": int(df.balls.sum()), "dismissals": int(df.dismissals.sum()),
                "boundaries": int(df.boundaries.sum()), "dots": int(df.dots.sum())} if len(df) else \
@@ -550,7 +635,7 @@ class Engine:
         if side == "bat":
             sql = f"""SELECT bowler AS opponent, sum(runs_off_bat) AS runs, sum(batter_faced::INT) AS balls,
                       sum(striker_out::INT) AS dismissals, sum(is_boundary::INT) AS boundaries
-                FROM balls WHERE striker = {q.p(player)} AND season BETWEEN {q.p(frm)} AND {q.p(to)}
+                FROM balls WHERE striker = {q.p(player)} AND {self._scope(f, q)}
                 GROUP BY 1 HAVING sum(batter_faced::INT) >= {q.p(min_balls)}"""
             df = self.query(sql, q.params)
             df["strike_rate"] = df.runs * 100.0 / df.balls
@@ -560,7 +645,7 @@ class Engine:
         else:
             sql = f"""SELECT striker AS opponent, sum(runs_conceded) AS runs, sum(legal_ball::INT) AS balls,
                       sum(bowler_wicket::INT) AS wickets, sum(is_boundary::INT) AS boundaries
-                FROM balls WHERE bowler = {q.p(player)} AND season BETWEEN {q.p(frm)} AND {q.p(to)}
+                FROM balls WHERE bowler = {q.p(player)} AND {self._scope(f, q)}
                 GROUP BY 1 HAVING sum(legal_ball::INT) >= {q.p(min_balls)}"""
             df = self.query(sql, q.params)
             df["economy"] = df.runs * 6.0 / df.balls
@@ -570,7 +655,7 @@ class Engine:
                 "filters_text": f.describe(), "warnings": []}
 
     # ---- venues ------------------------------------------------------
-    def venue_profile(self, venue: str | None = None, filters: dict | None = None, min_matches: int = 3) -> dict:
+    def venue_profile(self, venue: str | None = None, filters: dict | None = None, min_matches: int = 3, limit: int = 60) -> dict:
         f = Filters.from_dict(filters)
         if venue:
             f.venue = canon_venue(venue)
@@ -583,7 +668,7 @@ class Engine:
                  avg(CASE WHEN winner IS NOT NULL THEN (winner = first_bat_team)::INT END) * 100 AS bat_first_win_pct,
                  avg(CASE WHEN winner IS NOT NULL THEN (winner = toss_winner)::INT END) * 100 AS toss_winner_win_pct,
                  avg((toss_decision = 'field')::INT) * 100 AS chose_to_field_pct
-          FROM matches m WHERE season BETWEEN {q.p(frm)} AND {q.p(to)} {vf} GROUP BY venue HAVING count(*) >= {q.p(min_matches)}),
+          FROM matches m WHERE {self._scope(f, q)} {vf} GROUP BY venue HAVING count(*) >= {q.p(min_matches)}),
         ph AS (
           SELECT venue,
             sum(CASE WHEN phase='powerplay' THEN runs_off_bat+extras END) * 6.0 / NULLIF(sum((phase='powerplay' AND legal_ball)::INT),0) AS powerplay_rpo,
@@ -591,9 +676,9 @@ class Engine:
             sum(CASE WHEN phase='death' THEN runs_off_bat+extras END) * 6.0 / NULLIF(sum((phase='death' AND legal_ball)::INT),0) AS death_rpo,
             sum(is_boundary::INT) * 100.0 / NULLIF(sum(batter_faced::INT),0) AS boundary_pct,
             sum(bowler_wicket::INT) * 1.0 / count(DISTINCT match_id) AS wickets_per_match
-          FROM balls b WHERE season BETWEEN {q.p(frm)} AND {q.p(to)} GROUP BY venue)
+          FROM balls b WHERE {self._scope(f, q)} GROUP BY venue)
         SELECT mm.*, ph.powerplay_rpo, ph.middle_rpo, ph.death_rpo, ph.boundary_pct, ph.wickets_per_match
-        FROM mm JOIN ph USING (venue) ORDER BY matches DESC"""
+        FROM mm JOIN ph USING (venue) ORDER BY matches DESC LIMIT {int(limit)}"""
         df = self.query(sql, q.params)
         notes = []
         if not len(df):
@@ -610,33 +695,33 @@ class Engine:
           SELECT season, count(DISTINCT match_id*10+innings) AS innings, sum(runs_off_bat) AS runs,
                  sum(batter_faced::INT) AS balls, sum(striker_out::INT) AS dismissals,
                  sum(is_boundary::INT) AS boundaries, round(avg(striker_pos),1) AS avg_pos
-          FROM balls WHERE striker = {q.p(player)} AND season BETWEEN {q.p(frm)} AND {q.p(to)}
+          FROM balls WHERE striker = {q.p(player)} AND {self._scope(f, q)}
           GROUP BY season ORDER BY season""", q.params)
         if len(bat):
             bat["strike_rate"] = bat.runs * 100.0 / bat.balls
             bat["average"] = bat.runs / bat.dismissals.where(bat.dismissals > 0)
         bph = self.query(f"""
           SELECT phase, sum(runs_off_bat) AS runs, sum(batter_faced::INT) AS balls, sum(striker_out::INT) AS dismissals
-          FROM balls WHERE striker = {q.p(player)} AND season BETWEEN {q.p(frm)} AND {q.p(to)} GROUP BY phase""", q.params)
+          FROM balls WHERE striker = {q.p(player)} AND {self._scope(f, q)} GROUP BY phase""", q.params)
         if len(bph):
             bph["strike_rate"] = bph.runs * 100.0 / bph.balls
         pos = self.query(f"""
           SELECT pos, count(*) AS innings FROM (SELECT min(striker_pos) AS pos FROM balls
-            WHERE striker = {q.p(player)} AND season BETWEEN {q.p(frm)} AND {q.p(to)} GROUP BY match_id, innings)
+            WHERE striker = {q.p(player)} AND {self._scope(f, q)} GROUP BY match_id, innings)
           GROUP BY pos ORDER BY pos""", q.params)
         bowl = self.query(f"""
           SELECT season, count(DISTINCT match_id*10+innings) AS innings, sum(legal_ball::INT) AS balls,
                  sum(runs_conceded) AS runs, sum(bowler_wicket::INT) AS wickets
-          FROM balls WHERE bowler = {q.p(player)} AND season BETWEEN {q.p(frm)} AND {q.p(to)}
+          FROM balls WHERE bowler = {q.p(player)} AND {self._scope(f, q)}
           GROUP BY season ORDER BY season""", q.params)
         if len(bowl):
             bowl["economy"] = bowl.runs * 6.0 / bowl.balls
         wph = self.query(f"""
           SELECT phase, sum(legal_ball::INT) AS balls, sum(runs_conceded) AS runs, sum(bowler_wicket::INT) AS wickets
-          FROM balls WHERE bowler = {q.p(player)} AND season BETWEEN {q.p(frm)} AND {q.p(to)} GROUP BY phase""", q.params)
+          FROM balls WHERE bowler = {q.p(player)} AND {self._scope(f, q)} GROUP BY phase""", q.params)
         if len(wph):
             wph["economy"] = wph.runs * 6.0 / wph.balls
-        rf = Filters(season_from=frm, season_to=to)
+        rf = f.role_window()
         bt = self.batting_roles(rf, min_innings=3)
         wt = self.bowling_roles(rf, min_balls=30)
         roles = (bt.loc[bt.player == player, "roles"].tolist() or [[]])[0] + \

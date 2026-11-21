@@ -111,13 +111,35 @@ document.addEventListener("input", (e) => {
   }, 150);
 });
 
+/* ---------------------------------------------------------------- scope (format / gender / competition) */
+function scope() {
+  const s = { format: $("#sc-format").value, gender: $("#sc-gender").value };
+  const c = $("#sc-comp").value.trim();
+  if (c) s.competition = c;
+  return s;
+}
+function restoreScope() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("dl_scope") || "{}");
+    if (saved.format) $("#sc-format").value = saved.format;
+    if (saved.gender) $("#sc-gender").value = saved.gender;
+    if (saved.competition) $("#sc-comp").value = saved.competition;
+  } catch (_) { /* ignore */ }
+  ["#sc-format", "#sc-gender", "#sc-comp"].forEach((id) => $(id).addEventListener("change", () => {
+    try { localStorage.setItem("dl_scope", JSON.stringify(scope())); } catch (_) { /* ignore */ }
+  }));
+}
+
 /* ---------------------------------------------------------------- init */
 async function init() {
   META = await api("/api/meta");
+  if (META.max_upload_mb) $("#max-mb").textContent = META.max_upload_mb;
   $("#status").textContent = `${META.counts.matches} matches - ${META.counts.balls.toLocaleString()} balls - chat: ${META.chat_mode}`;
   const fill = (sel, items, blank) => { $(sel).innerHTML = (blank ? `<option value="">${blank}</option>` : "") + items.map((i) => `<option>${esc(i)}</option>`).join(""); };
-  fill("#f-venue", META.venues, "any"); fill("#f-team", META.teams, "any"); fill("#f-opp", META.teams, "any");
-  fill("#v-venue", META.venues, "All venues");
+  const dl = (id, items) => { $(id).innerHTML = items.map((i) => `<option value="${esc(i)}">`).join(""); };
+  dl("#venue-list", META.venues); dl("#team-list", META.teams);
+  dl("#comp-list", [...new Set(META.competitions.map((c) => c.competition))]);
+  restoreScope();
   setRoleOptions();
   setMetricChips();
   const ex = ["best middle order batters by strike rate since 2022", "top 10 death bowlers by economy in the last 3 seasons", "top openers by average at Wankhede since 2023",
@@ -147,7 +169,7 @@ $("#chatform").onsubmit = async (e) => {
   addChat("user", q);
   const wait = addChat("assistant", "Thinking...");
   try {
-    const r = await api("/api/chat", { message: q, history: history.slice(-8) });
+    const r = await api("/api/chat", { message: q, history: history.slice(-8), scope: scope() });
     wait.remove();
     const box = document.createElement("div");
     (r.warnings || []).forEach((w) => { const d = document.createElement("div"); d.className = "warn"; d.textContent = w; box.appendChild(d); });
@@ -180,7 +202,7 @@ $("#r-side").onchange = () => { setRoleOptions(); setMetricChips(); $("#r-formul
 
 function collectFilters(prefix = "f") {
   const g = (id) => $("#" + id).value;
-  const f = {};
+  const f = { ...scope() };
   const set = (k, v, num) => { if (v !== "" && v != null) f[k] = num ? Number(v) : v; };
   set("last_n_seasons", g("f-last"), 1); set("season_from", g("f-from"), 1); set("season_to", g("f-to"), 1);
   set("phase", g("f-phase")); set("venue", g("f-venue")); set("team", g("f-team")); set("opposition", g("f-opp"));
@@ -216,7 +238,7 @@ $("#m-kind").onchange = () => {
 $("#m-run").onclick = (e) => busy(e.target, async () => {
   const out = $("#m-out"); out.innerHTML = '<div class="card">Working...</div>';
   const kind = $("#m-kind").value, a = $("#m-a").value, b = $("#m-b").value, last = $("#m-last").value;
-  const filters = last ? { last_n_seasons: Number(last) } : {};
+  const filters = { ...scope(), ...(last ? { last_n_seasons: Number(last) } : {}) };
   try {
     let r;
     out.innerHTML = "";
@@ -248,7 +270,7 @@ $("#v-run").onclick = (e) => busy(e.target, async () => {
   const out = $("#v-out"); out.innerHTML = "";
   const v = $("#v-venue").value, from = $("#v-from").value;
   try {
-    const r = await api("/api/venues?" + new URLSearchParams({ ...(v ? { venue: v } : {}), ...(from ? { season_from: from } : {}) }));
+    const r = await api("/api/venues?" + new URLSearchParams({ ...scope(), ...(v ? { venue: v } : {}), ...(from ? { season_from: from } : {}) }));
     const cols = ["venue", "matches", "avg_first_innings", "avg_second_innings", "bat_first_win_pct", "toss_winner_win_pct", "chose_to_field_pct", "powerplay_rpo", "middle_rpo", "death_rpo", "boundary_pct", "wickets_per_match"];
     renderBlock(out, { title: v ? v : "All venues (3+ matches)", sub: r.filters_text, cols, rows: r.venues, warnings: r.warnings, chart: r.venues.length > 1 ? { label: "venue", value: "avg_first_innings" } : null });
   } catch (err) { showErr(out, err); }
@@ -257,7 +279,7 @@ $("#v-run").onclick = (e) => busy(e.target, async () => {
 /* ---------------------------------------------------------------- replacement */
 $("#s-run").onclick = (e) => busy(e.target, async () => {
   const out = $("#s-out"); out.innerHTML = "";
-  const body = { player: $("#s-player").value, side: $("#s-side").value, n: Number($("#s-n").value || 8), filters: { last_n_seasons: Number($("#s-last").value || 3) } };
+  const body = { player: $("#s-player").value, side: $("#s-side").value, n: Number($("#s-n").value || 8), filters: { ...scope(), last_n_seasons: Number($("#s-last").value || 3) } };
   if ($("#s-price").value) body.max_price = Number($("#s-price").value);
   if ($("#s-nat").value) body.nationality = $("#s-nat").value;
   try {
@@ -276,7 +298,7 @@ function buildSlots() {
   $("#a-slots").innerHTML = Object.keys(roles).map((r) => `<label>${nice(r)}<input type="number" min="0" max="6" data-slot="${r}" placeholder="auto"></label>`).join("");
 }
 const squadList = () => $("#a-squad").value.split("\n").map((s) => s.trim()).filter(Boolean);
-const aFilters = () => ({ last_n_seasons: Number($("#a-last").value || 3) });
+const aFilters = () => ({ ...scope(), last_n_seasons: Number($("#a-last").value || 3) });
 $("#a-gaps").onclick = (e) => busy(e.target, async () => {
   const out = $("#a-out"); out.innerHTML = "";
   try {

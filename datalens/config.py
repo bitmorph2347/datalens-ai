@@ -8,7 +8,10 @@ META_CSV = DATA_DIR / "players_meta.csv"
 PRICES_CSV = DATA_DIR / "prices_sample.csv"
 PROJECTS_DIR = DATA_DIR / "projects"
 WEB_DIR = ROOT / "web"
-CRICSHEET_URL = "https://cricsheet.org/downloads/ipl_male_csv2.zip"
+CRICSHEET_BASE = "https://cricsheet.org/downloads"
 
-# Phase boundaries (0-indexed overs): powerplay 0-5, middle 6-14, death 15-19
-PHASES = {"powerplay": (0, 5), "middle": (6, 14), "death": (15, 19)}
+# Phase boundaries (0-indexed overs) per format
+PHASES = {
+    "T20": {"powerplay": (0, 5), "middle": (6, 14), "death": (15, 19)},
+    "ODI": {"powerplay": (0, 9), "middle": (10, 39), "death": (40, 49)},
+}

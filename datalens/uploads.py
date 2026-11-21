@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import threading
 
@@ -12,8 +13,9 @@ import pandas as pd
 from .chat import safe_select
 from .engine import records
 
-MAX_BYTES = 25 * 1024 * 1024
-MAX_ROWS = 500_000
+MAX_MB = int(os.environ.get("DATALENS_MAX_UPLOAD_MB", "200"))  # raise/lower with the env var
+MAX_BYTES = MAX_MB * 1024 * 1024
+MAX_ROWS = 5_000_000
 
 
 def _slug(name: str) -> str:
@@ -41,14 +43,17 @@ class UploadStore:
 
     def add(self, filename: str, content: bytes) -> dict:
         if len(content) > MAX_BYTES:
-            raise ValueError("File too large (max 25 MB)")
+            raise ValueError(f"File too large (max {MAX_MB} MB). Set DATALENS_MAX_UPLOAD_MB to allow bigger files.")
         if not filename.lower().endswith((".csv", ".tsv", ".txt")):
             raise ValueError("Please upload a .csv or .tsv file")
-        sep = "\t" if filename.lower().endswith(".tsv") else None
+        sep = "\t" if filename.lower().endswith(".tsv") else ","
         df = None
         for enc in ("utf-8", "utf-8-sig", "latin-1"):
             try:
-                df = pd.read_csv(io.BytesIO(content), sep=sep, engine="python", encoding=enc, nrows=MAX_ROWS)
+                try:  # fast C parser first; fall back to delimiter sniffing for odd files
+                    df = pd.read_csv(io.BytesIO(content), sep=sep, encoding=enc, nrows=MAX_ROWS)
+                except pd.errors.ParserError:
+                    df = pd.read_csv(io.BytesIO(content), sep=None, engine="python", encoding=enc, nrows=MAX_ROWS)
                 break
             except UnicodeDecodeError:
                 continue

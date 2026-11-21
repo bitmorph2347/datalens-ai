@@ -13,7 +13,7 @@ import re
 
 from . import similarity
 from .engine import BAT_ROLES, BOWL_ROLES, Engine, norm_role
-from .names import VENUE_RULES, canon_venue
+from .names import COMPETITION_ALIASES, VENUE_RULES, canon_venue
 
 MODEL = os.environ.get("DATALENS_MODEL", "claude-sonnet-5-5")
 MAX_SQL_ROWS = 200
@@ -37,14 +37,14 @@ def safe_select(sql: str) -> str:
     return f"SELECT * FROM ({s}) AS q LIMIT {MAX_SQL_ROWS}"
 
 
-SCHEMA_HELP = """Tables (IPL ball-by-ball, Cricsheet, one row per delivery, super overs excluded):
-balls(match_id, season, match_date, venue, innings, over[0-19], phase['powerplay'|'middle'|'death'],
+SCHEMA_HELP = """Tables (T20 and ODI ball-by-ball from Cricsheet, men's and women's, internationals and club leagues; one row per delivery, super overs excluded):
+balls(match_id, season, match_date, venue, fmt['T20'|'ODI'], gender['male'|'female'], team_type['international'|'club'], competition, innings, over[0-based], phase['powerplay'|'middle'|'death' - T20: overs 1-6/7-15/16-20, ODI: 1-10/11-40/41-50],
   batting_team, bowling_team, striker, non_striker, bowler, runs_off_bat, extras, wides, noballs, byes, legbyes,
   wicket_type, player_dismissed, batter_faced[bool], legal_ball[bool], runs_conceded, bowler_wicket[bool],
   striker_out[bool], is_boundary[bool], striker_pos[1-11 batting position])
-matches(match_id, season, match_date, venue, team1, team2, toss_winner, toss_decision, winner, player_of_match,
+matches(match_id, season, match_date, venue, fmt, gender, team_type, competition, team1, team2, toss_winner, toss_decision, winner, player_of_match,
   first_bat_team, inn1_runs, inn2_runs)
-players_meta(player, nationality['IND'|'OS'], bat_hand['L'|'R'], bowl_style['RAP','LAP','OB','LB','SLA','LCH'], bowl_kind['pace'|'spin'])
+players_meta(player, nationality['IND'|'OS'|'UNK'], country, bat_hand['L'|'R'], bowl_style['RAP','LAP','OB','LB','SLA','LCH'], bowl_kind['pace'|'spin'])
 Player names use Cricsheet format, e.g. 'V Kohli', 'JJ Bumrah', 'RG Sharma', 'MS Dhoni'."""
 
 SYSTEM_PROMPT = f"""You are DataLens AI, a cricket analytics assistant for IPL data.
@@ -52,7 +52,9 @@ Always answer by calling tools - never invent statistics. Prefer rank_players fo
 phases and custom formulas); use run_sql only for questions the other tools cannot answer.
 Roles are inferred from data: batting roles from batting position (opener 1-2, top_order 1-3, middle_order 4-6,
 finisher = 4-7 with many balls in overs 16-20); bowling roles from the share of balls bowled per phase.
-Always mention sample sizes, point out small samples, and state which filters you applied.
+Stats are never mixed across formats or genders: every analytics tool takes format (T20/ODI), gender and competition
+filters. Use the scope the user has selected (given below) unless their question says otherwise. When writing SQL,
+always filter fmt and gender. Always mention sample sizes, point out small samples, and state which filters you applied.
 Be concise. Format numbers sensibly (strike rate 1 decimal, economy 2 decimals).
 
 {SCHEMA_HELP}"""
@@ -69,6 +71,9 @@ FILTER_SCHEMA = {
         "bowler_kind": {"type": "string", "enum": ["pace", "spin"], "description": "batting queries: restrict to deliveries from this bowler type"},
         "batter_hand": {"type": "string", "enum": ["L", "R"], "description": "bowling queries: restrict to this batter hand"},
         "pos_min": {"type": "integer"}, "pos_max": {"type": "integer"},
+        "format": {"type": "string", "enum": ["T20", "ODI"]}, "gender": {"type": "string", "enum": ["male", "female"]},
+        "competition": {"type": "string", "description": "e.g. 'Indian Premier League', 'Big Bash League', 'International'"},
+        "team_type": {"type": "string", "enum": ["international", "club"]},
     },
 }
 
@@ -116,6 +121,9 @@ class ToolBox:
 
     def call(self, name: str, args: dict) -> dict:
         a = dict(args or {})
+        for k in ("batter", "bowler", "player"):
+            if a.get(k):
+                a[k] = self.e.resolve_player(a[k], prefer_famous=True)
         if name == "rank_players":
             return self.e.rank(a.get("side", "bat"), filters=a.get("filters"), formula=a.get("formula"), role=a.get("role"),
                                min_balls=a.get("min_balls"), limit=a.get("limit", 10), order=a.get("order"))
@@ -188,6 +196,11 @@ def _shrink(res: dict, max_rows: int = 25) -> dict:
     return out
 
 
+def _scope_note(scope: dict | None) -> str:
+    sc = {k: v for k, v in (scope or {}).items() if v not in (None, "")}
+    return f"\n\nCurrent scope selected by the user (default filters): {json.dumps(sc)}" if sc else ""
+
+
 class ChatAgent:
     def __init__(self, engine: Engine, client=None):
         self.e = engine
@@ -201,26 +214,26 @@ class ChatAgent:
     def mode(self) -> str:
         return "claude" if self.client else "rules"
 
-    def ask(self, message: str, history: list[dict] | None = None) -> dict:
+    def ask(self, message: str, history: list[dict] | None = None, scope: dict | None = None) -> dict:
         message = (message or "").strip()
         if not message:
             raise ValueError("Empty message")
         if self.client:
             try:
-                return self._ask_claude(message, history or [])
+                return self._ask_claude(message, history or [], scope)
             except Exception as exc:  # fall back rather than fail the user's question
-                out = self._ask_rules(message)
+                out = self._ask_rules(message, scope)
                 out["warnings"].insert(0, f"Claude mode failed ({type(exc).__name__}); answered with the built-in parser instead.")
                 return out
-        return self._ask_rules(message)
+        return self._ask_rules(message, scope)
 
     # -- claude --
-    def _ask_claude(self, message: str, history: list[dict]) -> dict:
+    def _ask_claude(self, message: str, history: list[dict], scope: dict | None = None) -> dict:
         msgs = [{"role": h["role"], "content": h["content"]} for h in history[-8:] if h.get("role") in ("user", "assistant") and h.get("content")]
         msgs.append({"role": "user", "content": message})
         steps, tables, warnings = [], [], []
         for _ in range(6):
-            resp = self.client.messages.create(model=MODEL, max_tokens=1500, system=SYSTEM_PROMPT, tools=TOOLS, messages=msgs)
+            resp = self.client.messages.create(model=MODEL, max_tokens=1500, system=SYSTEM_PROMPT + _scope_note(scope), tools=TOOLS, messages=msgs)
             if resp.stop_reason != "tool_use":
                 text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
                 return {"mode": "claude", "answer": text, "steps": steps, "tables": tables, "warnings": warnings}
@@ -242,7 +255,7 @@ class ChatAgent:
         return {"mode": "claude", "answer": "I couldn't finish within the step limit - try a narrower question.", "steps": steps, "tables": tables, "warnings": warnings}
 
     # -- rules --
-    def _ask_rules(self, message: str) -> dict:
+    def _ask_rules(self, message: str, scope: dict | None = None) -> dict:
         try:
             plan = parse_question(self.e, message)
         except ValueError as exc:
@@ -250,6 +263,9 @@ class ChatAgent:
         if plan is None:
             return {"mode": "rules", "answer": HELP, "steps": [], "tables": [], "warnings": []}
         name, args = plan
+        if scope and name not in ("run_sql",):
+            # the user's selected scope is the default; anything the question itself says wins
+            args["filters"] = {**{k: v for k, v in scope.items() if v not in (None, "")}, **(args.get("filters") or {})}
         res = self.tools.call(name, args)
         tbl = tables_from(name, res)
         return {"mode": "rules", "answer": describe_result(name, args, res), "steps": [
@@ -318,6 +334,30 @@ def _filters(e: Engine, text: str) -> dict:
         f["batter_hand"] = "L"
     elif re.search(r"\b(vs|against)\b.*\b(right[- ]?hand(ers|ed)?)\b", t):
         f["batter_hand"] = "R"
+    if re.search(r"\bodis?\b|one[- ]day", t):
+        f["format"] = "ODI"
+    if re.search(r"\bt20is?\b|t20 internationals?", t):
+        f["format"], f["team_type"], f["competition"] = "T20", "international", "International"
+    elif re.search(r"\b(international|internationals)\b", t):
+        f["team_type"] = "international"
+    if re.search(r"\bwomen'?s?\b|\bwoman\b|\bfemale\b", t):
+        f["gender"] = "female"
+    elif re.search(r"\bmen'?s\b|\bmale\b", t):
+        f["gender"] = "male"
+    comp = None
+    for alias, name in COMPETITION_ALIASES.items():
+        if alias in ("international", "internationals", "t20i", "t20is"):
+            continue
+        if re.search(rf"\b{re.escape(alias)}\b", t):
+            comp = name
+            break
+    if comp is None:
+        for name in sorted(e._comps, key=len, reverse=True):
+            if len(name) > 6 and name in t:
+                comp = name
+                break
+    if comp:
+        f["competition"] = comp
     if re.search(r"\bchasing\b|second innings", t):
         f["innings"] = 2
     elif re.search(r"batting first|first innings", t):
@@ -336,6 +376,12 @@ def _filters(e: Engine, text: str) -> dict:
                 if any(k in t for k in keys):
                     f["venue"] = canon
                     break
+            else:
+                for v in e.venue_names:
+                    short = v.split(",")[0].lower()
+                    if len(short) > 6 and short in t:
+                        f["venue"] = v
+                        break
     for alias, team in TEAM_ALIASES.items():
         if re.search(rf"\b(for|of) {re.escape(alias)}\b", t):
             f["team"] = team
@@ -344,9 +390,14 @@ def _filters(e: Engine, text: str) -> dict:
     return f
 
 
+def _ctx(e: Engine, text: str) -> dict:
+    """Scope-type filters mentioned in the question (format, gender, competition, seasons...), minus matchup keys."""
+    return {k: v for k, v in _filters(e, text).items() if k not in ("bowler_kind", "batter_hand")}
+
+
 def _try_player(e: Engine, name: str):
     try:
-        return e.resolve_player(name)
+        return e.resolve_player_nl(name)
     except ValueError:
         return None
 
@@ -361,8 +412,8 @@ def parse_question(e: Engine, text: str):
     if m := re.search(r"(?:similar to|players like|replacement for|replace|alternatives? to|like)\s+(.+)$", t):
         name = re.sub(r"\b(in|since|for|from|under)\b.*$", "", m.group(1)).strip()
         side = "bowl" if re.search(BOWL_WORDS, t) else "bat"
-        pl = e.resolve_player(name)
-        return "similar_players", {"player": pl, "side": side, "n": 8}
+        pl = e.resolve_player_nl(name)
+        return "similar_players", {"player": pl, "side": side, "n": 8, "filters": _ctx(e, text)}
     # --- "<player> vs <something>"
     RANK_WORDS = ("best", "top", "who", "most", "highest", "lowest", "leading", "rank", "openers", "finishers", "bowlers", "batters")
     if m := re.match(r"^(.+?)\s+(?:vs|v|against)\s+(.+)$", t):
@@ -373,17 +424,18 @@ def parse_question(e: Engine, text: str):
         if not any(w in a.split() for w in RANK_WORDS):
             pa = _try_player(e, a)
             if pa and re.fullmatch(r"(pace|pacers?|fast bowlers?|spin|spinners?|spin bowlers?)", b):
-                return "batter_vs_bowler_types", {"batter": pa, "filters": {}}
+                return "batter_vs_bowler_types", {"batter": pa, "filters": _ctx(e, text)}
             if pa and re.fullmatch(r"(left[- ]?hand(ers|ed)?|right[- ]?hand(ers|ed)?|lefties)( batters?| batsmen)?", b):
-                return "bowler_vs_batter_hands", {"bowler": pa, "filters": {}}
+                return "bowler_vs_batter_hands", {"bowler": pa, "filters": _ctx(e, text)}
             pb = _try_player(e, b)
             if pa and pb:
-                return "head_to_head", {"batter": pa, "bowler": pb}
+                return "head_to_head", {"batter": pa, "bowler": pb, "filters": _ctx(e, text)}
     if m := re.search(r"how (?:does|do|did) (.+?) (?:play|bat|perform|fare) (?:against|vs|versus) (pace|spin)", t):
-        return "batter_vs_bowler_types", {"batter": e.resolve_player(m.group(1)), "filters": {}}
+        return "batter_vs_bowler_types", {"batter": e.resolve_player_nl(m.group(1)), "filters": _ctx(e, text)}
     # --- player profile
     if m := re.match(r"^(?:profile|stats|summary|tell me about)(?: of| for)? (.+)$", t):
-        return "player_profile", {"player": e.resolve_player(m.group(1).strip())}
+        name = re.split(r"\b(?:in|at|since|for|from|last|women'?s?|men'?s?|female|male|t20i?s?|odis?)\b", m.group(1))[0].strip()
+        return "player_profile", {"player": e.resolve_player_nl(name), "filters": _ctx(e, text)}
     # --- rankings
     if re.search(r"\b(best|top|highest|lowest|rank|who|most|leading|better)\b", t):
         role = next((r for pat, r in ROLE_PATTERNS if re.search(pat, t)), None)

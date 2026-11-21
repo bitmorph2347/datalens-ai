@@ -162,6 +162,15 @@ def test_upload_profile_and_clean():
         u.query("SELECT * FROM read_csv('/etc/passwd')")
 
 
+def test_upload_accepts_files_over_25mb():
+    from datalens.uploads import MAX_MB
+    assert MAX_MB >= 200
+    body = b"id,label\n" + b"".join(b"%d,some_text_value_for_size_padding_xxxxxxxxxxxx\n" % i for i in range(600_000))
+    assert len(body) > 25 * 1024 * 1024
+    p = UploadStore().add("big.csv", body)
+    assert p["rows"] == 600_000
+
+
 def test_upload_rejects_bad_files():
     u = UploadStore()
     with pytest.raises(ValueError):

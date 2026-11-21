@@ -6,7 +6,7 @@ import pandas as pd
 from scipy.optimize import Bounds, LinearConstraint, milp
 
 from . import config
-from .engine import BAT_ROLES, BOWL_ROLES, Engine, Filters, norm_role, records
+from .engine import BAT_ROLES, BOWL_ROLES, Engine, Filters, _Q, norm_role, records
 
 DEFAULT_BAT_FORMULA = "0.5*z(strike_rate) + 0.3*z(average) + 0.2*z(boundary_pct)"
 DEFAULT_BOWL_FORMULA = "0.5*z(wickets_per_over) - 0.5*z(economy)"
@@ -38,19 +38,20 @@ def load_prices(engine: Engine, path=None, df: pd.DataFrame | None = None) -> tu
 
 
 def make_sample_prices(engine: Engine, path=config.PRICES_CSV) -> pd.DataFrame:
-    """Synthetic, clearly-labelled prices so the optimizer works out of the box. NOT real auction data."""
-    f = Filters(last_n_seasons=3)
-    q = engine.query(f"""
-        WITH bt AS (SELECT striker p, sum(runs_off_bat) runs FROM balls WHERE season BETWEEN {engine._seasons(f)[0]} AND {engine._seasons(f)[1]} GROUP BY 1),
-             bw AS (SELECT bowler p, sum(bowler_wicket::INT) w, sum(legal_ball::INT) lb FROM balls WHERE season BETWEEN {engine._seasons(f)[0]} AND {engine._seasons(f)[1]} GROUP BY 1)
-        SELECT COALESCE(bt.p, bw.p) AS player, COALESCE(bt.runs, 0) + 22 * COALESCE(bw.w, 0) AS impact,
-               COALESCE(bt.runs, 0) AS runs, COALESCE(bw.lb, 0) AS lb
-        FROM bt FULL JOIN bw ON bt.p = bw.p WHERE COALESCE(bt.runs, 0) + COALESCE(bw.lb, 0) >= 60""")
-    q["pct"] = q.impact.rank(pct=True)
-    q["price_cr"] = (0.3 + 17.7 * q.pct ** 3).round(2)
+    """Synthetic, clearly-labelled prices for IPL regulars so the optimizer works out of the box. NOT real auction data."""
+    f = Filters(competition="Indian Premier League", last_n_seasons=3)
+    q = _Q()
+    cond = engine._scope(f, q)
+    q2 = engine.query(f"""
+        WITH bt AS (SELECT striker p, sum(runs_off_bat) runs FROM balls WHERE {cond} GROUP BY 1),
+             bw AS (SELECT bowler p, sum(bowler_wicket::INT) w, sum(legal_ball::INT) lb FROM balls WHERE {cond} GROUP BY 1)
+        SELECT COALESCE(bt.p, bw.p) AS player, COALESCE(bt.runs, 0) + 22 * COALESCE(bw.w, 0) AS impact
+        FROM bt FULL JOIN bw ON bt.p = bw.p WHERE COALESCE(bt.runs, 0) + COALESCE(bw.lb, 0) >= 60""", q.params)
+    q2["pct"] = q2.impact.rank(pct=True)
+    q2["price_cr"] = (0.3 + 17.7 * q2.pct ** 3).round(2)
     meta = engine.query("SELECT player, nationality FROM players_meta")
-    q = q.merge(meta, on="player", how="left")
-    out = q[["player", "price_cr", "nationality"]].sort_values("price_cr", ascending=False)
+    q2 = q2.merge(meta, on="player", how="left")
+    out = q2[["player", "price_cr", "nationality"]].sort_values("price_cr", ascending=False)
     out["nationality"] = out["nationality"].fillna("UNK")
     out["source"] = "synthetic-illustrative"
     out.to_csv(path, index=False)
@@ -76,7 +77,7 @@ def optimize(engine: Engine, prices: pd.DataFrame, purse: float, slots: dict[str
     price = prices.set_index("player")
     pool_players = [p for p in price.index if p not in exclude_set]
     if active_only:
-        active = engine.active_players()
+        active = engine.active_players(f)
         pool_players = [p for p in pool_players if p in active]
     cand: list[dict] = []
     warnings: list[str] = []
