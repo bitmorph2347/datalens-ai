@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import ssl
 import sys
 import urllib.request
 import zipfile
@@ -21,9 +22,18 @@ def download(force: bool = False) -> None:
     if not force and any(config.RAW_DIR.glob("*_info.csv")):
         return
     print(f"Downloading {config.CRICSHEET_URL} ...")
+    try:  # some Python installs ship without system CA certificates; prefer certifi's bundle
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
     req = urllib.request.Request(config.CRICSHEET_URL, headers={"User-Agent": "datalens-ai/0.1"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=120, context=ctx) as r:
+            data = r.read()
+    except OSError as exc:
+        raise SystemExit(f"Could not download the data ({exc}).\nDownload {config.CRICSHEET_URL} manually, "
+                         f"unzip it into {config.RAW_DIR}, then run this command again.") from None
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         z.extractall(config.RAW_DIR)
 
