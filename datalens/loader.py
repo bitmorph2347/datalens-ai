@@ -15,6 +15,10 @@ import duckdb
 from . import config
 from .names import BOWL_KIND, TEAM_CANON, canon_team, canon_venue
 
+RAW_COLUMNS = ["match_id", "season", "start_date", "venue", "innings", "ball", "actual_delivery", "batting_team",
+               "bowling_team", "striker", "non_striker", "bowler", "runs_off_bat", "extras", "wides", "noballs",
+               "byes", "legbyes", "penalty", "non_boundary", "wicket_type", "player_dismissed",
+               "other_wicket_type", "other_player_dismissed", "fielder_1", "fielder_2", "fielder_3"]
 WICKET_BOWLER = ("bowled", "caught", "caught and bowled", "lbw", "stumped", "hit wicket")
 
 
@@ -83,20 +87,37 @@ def build(db_path: Path = config.DB_PATH) -> Path:
     con.execute("CREATE TABLE match_players(match_id BIGINT, team VARCHAR, player VARCHAR)")
     con.executemany("INSERT INTO match_players VALUES (?,?,?)", squads)
 
+    # ---- raw ball-by-ball CSVs, read in small batches (opening ~1,200 files at once exceeds the
+    #      default open-file limit of 256 on macOS) ----
+    cols = ", ".join(f"{c} VARCHAR" for c in RAW_COLUMNS)
+    con.execute(f"CREATE TABLE raw_txt({cols})")
+    files = sorted(f for f in config.RAW_DIR.glob("*.csv") if f.stem.isdigit())  # skips *_info.csv and all_matches.csv
+    for i in range(0, len(files), 50):
+        batch = [str(f) for f in files[i:i + 50]]
+        con.execute("INSERT INTO raw_txt BY NAME SELECT * FROM read_csv(?, header=true, all_varchar=true, "
+                    "union_by_name=true)", [batch])
+
     # ---- venue / team canonicalisation lookups ----
-    raw_venues = [r[0] for r in con.execute(
-        f"SELECT DISTINCT venue FROM read_csv('{config.RAW_DIR}/*[0-9].csv', header=true, union_by_name=true, sample_size=-1)").fetchall()]
+    raw_venues = [r[0] for r in con.execute("SELECT DISTINCT venue FROM raw_txt").fetchall()]
     con.execute("CREATE TABLE venue_map(raw VARCHAR, canon VARCHAR)")
     con.executemany("INSERT INTO venue_map VALUES (?,?)", [(v, canon_venue(v)) for v in raw_venues])
     con.execute("CREATE TABLE team_map(raw VARCHAR, canon VARCHAR)")
     con.executemany("INSERT INTO team_map VALUES (?,?)", list(TEAM_CANON.items()))
 
-    # ---- raw ball-by-ball (super overs excluded) ----
-    con.execute(f"""CREATE TABLE raw AS
-        SELECT *, row_number() OVER () AS seq
-        FROM read_csv('{config.RAW_DIR}/*[0-9].csv', header=true, auto_detect=true,
-                      union_by_name=true, sample_size=-1)
-        WHERE innings <= 2""")
+    # ---- typed ball-by-ball table (super overs excluded) ----
+    con.execute("""CREATE TABLE raw AS
+        SELECT * FROM (
+            SELECT CAST(match_id AS BIGINT) AS match_id, season, CAST(start_date AS DATE) AS start_date, venue,
+                   CAST(innings AS BIGINT) AS innings, CAST(ball AS DOUBLE) AS ball,
+                   CAST(actual_delivery AS DOUBLE) AS actual_delivery, batting_team, bowling_team,
+                   striker, non_striker, bowler, CAST(runs_off_bat AS BIGINT) AS runs_off_bat,
+                   CAST(extras AS BIGINT) AS extras, CAST(wides AS BIGINT) AS wides,
+                   CAST(noballs AS BIGINT) AS noballs, CAST(byes AS BIGINT) AS byes,
+                   CAST(legbyes AS BIGINT) AS legbyes, CAST(penalty AS BIGINT) AS penalty,
+                   TRY_CAST(non_boundary AS BOOLEAN) AS non_boundary, wicket_type, player_dismissed,
+                   row_number() OVER () AS seq
+            FROM raw_txt) WHERE innings <= 2""")
+    con.execute("DROP TABLE raw_txt")
 
     wk = ",".join(f"'{w}'" for w in WICKET_BOWLER)
     con.execute(f"""CREATE TABLE balls AS
