@@ -61,7 +61,7 @@ Each year: run `python -m datalens.loader --update` for new matches, then update
 
 ## Public deployment
 
-The project ships a `Dockerfile` and a public mode (`DATALENS_PUBLIC=1`) built for a free Hugging Face Space - see [docs/DEPLOY.md](docs/DEPLOY.md) for the step-by-step guide. Public mode gives every visitor **private per-session** uploads, saved projects and roster lists (deleted after 6 hours idle), **rate limits** (HTTP 429), **upload caps** (25 MB, 3 tables), disabled raw SQL and API docs, no paid AI calls unless explicitly allowed, security headers (including a Content-Security-Policy) and generic error messages. The footer credits Cricsheet and the Open Data Commons Attribution License. Try it locally with `DATALENS_PUBLIC=1 python -m datalens.api`.
+The project ships a `Dockerfile` and a public mode (`DATALENS_PUBLIC=1`) built for a Hugging Face Docker Space (needs their PRO plan) or any Docker host - see [docs/DEPLOY.md](docs/DEPLOY.md) for the step-by-step guide. For a free, temporary public link, run it in public mode and expose it with a tunnel (`ssh -R 80:localhost:8010 nokey@localhost.run`). Public mode gives every visitor **private per-session** uploads, saved projects and roster lists (deleted after 6 hours idle), **rate limits** (HTTP 429), **upload caps** (25 MB, 3 tables), disabled raw SQL and API docs, no paid AI calls unless explicitly allowed, security headers (including a Content-Security-Policy) and generic error messages. The footer credits Cricsheet and the Open Data Commons Attribution License. Try it locally with `DATALENS_PUBLIC=1 python -m datalens.api`.
 
 ## The headline example
 

@@ -1,6 +1,11 @@
 # Deploying DataLens AI publicly (Hugging Face Spaces)
 
-A Space is a free, always-available web host for apps. This project ships a `Dockerfile` that builds the cricket
+> **Cost note (checked Nov 2026):** Hugging Face now requires a **PRO subscription** to run a Docker Space on the
+> free CPU tier (creating one without PRO fails with `402 Payment Required`). Static Spaces are free but cannot run
+> this Python app. If you don't want to pay, use the free temporary tunnel in the section at the end, or another
+> host that can run a Docker image (for example Google Cloud Run, which needs a billing card).
+
+A Space is an always-available web host for apps. This project ships a `Dockerfile` that builds the cricket
 database during the build and starts the app in **public mode**.
 
 ## What public mode does
@@ -19,7 +24,7 @@ Turned on by `DATALENS_PUBLIC=1` (the Dockerfile sets it):
 
 ## One-time setup (about 10 minutes plus the first build)
 
-1. Create a free account at https://huggingface.co.
+1. Create an account at https://huggingface.co and subscribe to PRO (needed for Docker Spaces, see the cost note above).
 2. Create an access token with **write** permission: Settings -> Access Tokens -> New token. Keep it private.
 3. In a terminal, from the project folder (with your virtual environment active):
 
@@ -51,8 +56,8 @@ If a command name differs on your version, `huggingface-cli` is the older name f
 - **New matches:** open the Space -> Settings -> *Factory rebuild* (or change `ARG DATA_VERSION` in the Dockerfile and
   upload again). The build re-downloads Cricsheet data.
 - **New code:** run `bash scripts/make_space_bundle.sh` and `hf upload ...` again.
-- **Hardware:** the free CPU Space (2 vCPU, 16 GB RAM) is enough. Free Spaces sleep after about 2 days without visitors
-  and wake on the next visit.
+- **Hardware:** the basic CPU Space has enough memory for the database. Spaces can sleep when idle and wake on the
+  next visit.
 
 ## Before you share the link
 - Check the app works: open the link, run a ranking, try the Auction tab, upload a small CSV.
@@ -64,3 +69,19 @@ If a command name differs on your version, `huggingface-cli` is the older name f
 ```bash
 DATALENS_PUBLIC=1 PORT=8002 python -m datalens.api
 ```
+
+## Free temporary public link (no account, no card)
+Always run in **public mode** (never expose the normal local mode: it allows raw SQL and shared saves). In one terminal:
+
+```bash
+DATALENS_PUBLIC=1 PORT=8010 python -m datalens.api
+```
+
+In a second terminal open a tunnel; it prints an `https://...lhr.life` address:
+
+```bash
+ssh -R 80:localhost:8010 nokey@localhost.run
+```
+
+(Alternative: `brew install cloudflared`, then `cloudflared tunnel --url http://localhost:8010`.) The link only works while both
+terminals are running and the computer is awake, and it changes each time.
