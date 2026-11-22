@@ -10,3 +10,4 @@ data/*.duckdb.wal
 data/*.duckdb.tmp
 data/projects/
 data/rosters.csv
+build/

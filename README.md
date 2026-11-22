@@ -37,7 +37,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m datalens.loader        # downloads Cricsheet data and builds data/datalens.duckdb (~5 min, ~256 MB)
 python -m datalens.api           # http://127.0.0.1:8000   (set PORT=8001 to use another port)
-pytest -q                        # 95 tests
+pytest -q                        # 119 tests
 ```
 
 The loader needs about 1 GB of temporary disk space and deletes the extracted CSVs when it finishes (`--keep-raw` keeps them). For a quick demo with IPL data only (under a minute): `python -m datalens.loader --scope ipl`. The full test suite expects the default `--scope all` data.
@@ -58,6 +58,10 @@ Who is "available"? Cricsheet has match data only, so rosters come from two plac
 - **Roster file** `data/rosters.csv` (template: `docs/rosters.example.csv`): after each retention / release / trade window, save the new squads from the Auction tab ("Save roster") or upload a CSV with columns `competition,season,team,player,status` (`retained` or `released`). A team with retained rows in the newest season of the file uses them instead of the auto-guess; `released` players are free to buy; a trade is a `retained` row under the new team. The two text boxes in the tab cover quick edits: *Released / free players* and *Not available* (signed elsewhere, retired, injured).
 
 Each year: run `python -m datalens.loader --update` for new matches, then update the rosters. Prices still come from the price list (sample prices are synthetic - upload real ones), and only priced players can be suggested. The Hundred is not covered (different structure; see limitations).
+
+## Public deployment
+
+The project ships a `Dockerfile` and a public mode (`DATALENS_PUBLIC=1`) built for a free Hugging Face Space - see [docs/DEPLOY.md](docs/DEPLOY.md) for the step-by-step guide. Public mode gives every visitor **private per-session** uploads, saved projects and roster lists (deleted after 6 hours idle), **rate limits** (HTTP 429), **upload caps** (25 MB, 3 tables), disabled raw SQL and API docs, no paid AI calls unless explicitly allowed, security headers (including a Content-Security-Policy) and generic error messages. The footer credits Cricsheet and the Open Data Commons Attribution License. Try it locally with `DATALENS_PUBLIC=1 python -m datalens.api`.
 
 ## The headline example
 
@@ -102,7 +106,7 @@ Safety notes: the analytics DB is opened **read-only with external file access d
 
 ## Engineering highlights
 
-- **Correctness checked against independent SQL:** 95 tests verify strike rate, economy, head-to-head and pace/spin totals against separate calculations, role rules (no openers in the middle-order list), per-format phase boundaries, gender/format separation, optimiser constraints and the API.
+- **Correctness checked against independent SQL:** 119 tests verify strike rate, economy, head-to-head and pace/spin totals against separate calculations, role rules (no openers in the middle-order list), per-format phase boundaries, gender/format separation, optimiser constraints and the API.
 - **Safe by construction:** user formulas compile from an AST whitelist; read-only database; SQL tool limited to one `SELECT`.
 - **Honest analytics:** minimum-sample guards, small-sample flags, and explicit coverage warnings when player metadata is incomplete.
 - **Entity resolution:** team, competition and venue renames are merged (e.g. Delhi Daredevils -> Delhi Capitals, NatWest T20 Blast -> Vitality Blast) and free-text player names resolve to Cricsheet names (`Rohit Sharma` -> `RG Sharma`), preferring the well-known player over namesakes.

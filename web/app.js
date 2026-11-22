@@ -7,8 +7,20 @@ const charts = {};
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const nice = (k) => k.replace(/_/g, " ");
 
+/* A random id for this browser; the public server keeps uploads and saved items separate per id. */
+const SID = (() => {
+  let id = null;
+  try { id = localStorage.getItem("dl_sid"); } catch (_) { /* storage blocked */ }
+  if (!id) {
+    const rand = crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : Math.random().toString(16).slice(2) + Date.now().toString(16) + Math.random().toString(16).slice(2);
+    id = rand.padEnd(24, "0").slice(0, 48);
+    try { localStorage.setItem("dl_sid", id); } catch (_) { /* ignore */ }
+  }
+  return id;
+})();
+
 async function api(path, body, method) {
-  const opt = { method: method || (body ? "POST" : "GET"), headers: {} };
+  const opt = { method: method || (body ? "POST" : "GET"), headers: { "X-Session-Id": SID } };
   if (body instanceof FormData) opt.body = body;
   else if (body) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
   const r = await fetch(path, opt);
@@ -75,7 +87,7 @@ async function exportAction(kind, o) {
       return;
     }
     const body = { title: o.title, columns: o.cols, rows: o.rows, sections: [{ title: o.title, text: o.sub || "", columns: o.cols, rows: o.rows, warnings: o.warnings || [] }] };
-    const r = await fetch("/api/export/" + (kind === "csv" ? "csv" : "report"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const r = await fetch("/api/export/" + (kind === "csv" ? "csv" : "report"), { method: "POST", headers: { "Content-Type": "application/json", "X-Session-Id": SID }, body: JSON.stringify(body) });
     const blob = await r.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -134,6 +146,7 @@ function restoreScope() {
 async function init() {
   META = await api("/api/meta");
   if (META.max_upload_mb) $("#max-mb").textContent = META.max_upload_mb;
+  if (META.public) $$(".public-only").forEach((el) => (el.hidden = false));
   $("#status").textContent = `${META.counts.matches} matches - ${META.counts.balls.toLocaleString()} balls - chat: ${META.chat_mode}`;
   const fill = (sel, items, blank) => { $(sel).innerHTML = (blank ? `<option value="">${blank}</option>` : "") + items.map((i) => `<option>${esc(i)}</option>`).join(""); };
   const dl = (id, items) => { $(id).innerHTML = items.map((i) => `<option value="${esc(i)}">`).join(""); };

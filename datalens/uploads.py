@@ -29,9 +29,13 @@ def _q(ident: str) -> str:
 
 
 class UploadStore:
-    def __init__(self) -> None:
+    def __init__(self, max_mb: int = MAX_MB, limited: bool = False, max_tables: int = 50) -> None:
+        self.max_mb, self.max_bytes, self.max_tables = max_mb, max_mb * 1024 * 1024, max_tables
         self.con = duckdb.connect(":memory:")
         self.con.execute("SET enable_external_access=false")
+        if limited:  # public site: keep one visitor's queries from starving the others
+            self.con.execute("SET threads=1")
+            self.con.execute("SET memory_limit='400MB'")
         self.frames: dict[str, pd.DataFrame] = {}
         self.lock = threading.Lock()
 
@@ -42,8 +46,8 @@ class UploadStore:
         self.con.unregister("_tmp_df")
 
     def add(self, filename: str, content: bytes) -> dict:
-        if len(content) > MAX_BYTES:
-            raise ValueError(f"File too large (max {MAX_MB} MB). Set DATALENS_MAX_UPLOAD_MB to allow bigger files.")
+        if len(content) > self.max_bytes:
+            raise ValueError(f"File too large (max {self.max_mb} MB).")
         if not filename.lower().endswith((".csv", ".tsv", ".txt")):
             raise ValueError("Please upload a .csv or .tsv file")
         sep = "\t" if filename.lower().endswith(".tsv") else ","
@@ -63,6 +67,8 @@ class UploadStore:
             raise ValueError("The file has no rows")
         df.columns = [re.sub(r"\s+", "_", str(c).strip()) or f"col_{i}" for i, c in enumerate(df.columns)]
         name = _slug(filename)
+        if name not in self.frames and len(self.frames) >= self.max_tables:
+            raise ValueError(f"You can keep at most {self.max_tables} uploaded tables at once.")
         with self.lock:
             self._load(name, df)
         return {"table": name, **self.profile(name)}

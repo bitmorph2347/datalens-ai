@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -19,7 +22,7 @@ from .chat import ChatAgent, safe_select
 from .engine import DEFAULT_TEMPLATE, Engine, Filters, records
 from .reports import render_report, to_csv
 from .rosters import RosterStore
-from .uploads import MAX_MB, UploadStore
+from .sessions import Session, SessionError, SessionManager
 
 
 class RankReq(BaseModel):
@@ -56,7 +59,7 @@ class SimilarReq(BaseModel):
 
 
 class SquadReq(BaseModel):
-    squad: list[str]
+    squad: list[str] = Field(max_length=80)
     template: dict[str, int] | None = None
     filters: dict = Field(default_factory=dict)
 
@@ -64,7 +67,7 @@ class SquadReq(BaseModel):
 class BudgetReq(BaseModel):
     purse: float = 50.0
     slots: dict[str, int] | None = None
-    squad: list[str] = Field(default_factory=list)
+    squad: list[str] = Field(default_factory=list, max_length=80)
     template: dict[str, int] | None = None
     max_overseas: int = 4
     filters: dict = Field(default_factory=dict)
@@ -74,22 +77,22 @@ class BudgetReq(BaseModel):
     active_only: bool = True
     team: str | None = None          # your team: other teams' players are then excluded
     use_roster: bool = True          # exclude players on other teams (needs a competition and team)
-    free: list[str] = Field(default_factory=list)    # released / free players (override other teams' lists)
-    taken: list[str] = Field(default_factory=list)   # not available: signed elsewhere, retired, injured
+    free: list[str] = Field(default_factory=list, max_length=300)    # released / free players (override other teams' lists)
+    taken: list[str] = Field(default_factory=list, max_length=300)   # not available: signed elsewhere, retired, injured
 
 
 class RosterSaveReq(BaseModel):
     filters: dict = Field(default_factory=dict)
     season: int
     team: str
-    retained: list[str] = Field(default_factory=list)
-    free: list[str] = Field(default_factory=list)
-    taken: list[str] = Field(default_factory=list)
+    retained: list[str] = Field(default_factory=list, max_length=80)
+    free: list[str] = Field(default_factory=list, max_length=300)
+    taken: list[str] = Field(default_factory=list, max_length=300)
 
 
 class ChatReq(BaseModel):
-    message: str
-    history: list[dict] = Field(default_factory=list)
+    message: str = Field(max_length=2000)
+    history: list[dict] = Field(default_factory=list, max_length=20)
     scope: dict = Field(default_factory=dict)
 
 
@@ -100,8 +103,8 @@ class SqlReq(BaseModel):
 class ExportReq(BaseModel):
     title: str = "DataLens export"
     columns: list[str] = Field(default_factory=list)
-    rows: list[dict] = Field(default_factory=list)
-    sections: list[dict] = Field(default_factory=list)
+    rows: list[dict] = Field(default_factory=list, max_length=20000)
+    sections: list[dict] = Field(default_factory=list, max_length=50)
 
 
 class ProjectReq(BaseModel):
@@ -111,23 +114,119 @@ class ProjectReq(BaseModel):
     notes: str = ""
 
 
-def create_app(engine: Engine | None = None, projects_dir: Path | None = None, rosters_path: Path | None = None) -> FastAPI:
-    app = FastAPI(title="DataLens AI", version="0.1.0",
+HEAVY_PREFIXES = ("/api/budget", "/api/similar", "/api/chat", "/api/upload", "/api/squad", "/api/rosters/upload",
+                  "/api/prices/upload", "/api/export")
+SMALL_FILE = 2 * 1024 * 1024  # price lists and roster files
+
+
+class RateLimiter:
+    """Sliding-window limiter per client key (public mode only)."""
+
+    def __init__(self, general: int, heavy: int, window: float = 60.0):
+        self.general, self.heavy, self.window = general, heavy, window
+        self._hits: dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, heavy: bool) -> bool:
+        now = time.time()
+        with self._lock:
+            if len(self._hits) > 5000:  # forget idle clients
+                self._hits = {k: v for k, v in self._hits.items() if v and now - v[-1][0] < self.window}
+            q = self._hits.setdefault(key, deque())  # entries are (timestamp, was_heavy)
+            while q and now - q[0][0] > self.window:
+                q.popleft()
+            if len(q) >= self.general:
+                return False
+            if heavy and sum(1 for _, was_heavy in q if was_heavy) >= self.heavy:
+                return False
+            q.append((now, heavy))
+            return True
+
+
+async def read_capped(file: UploadFile, limit: int) -> bytes:
+    """Read an upload in chunks and refuse it as soon as it exceeds ``limit`` bytes."""
+    chunks, size = [], 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(413, f"File too large (max {limit // (1024 * 1024)} MB).")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; "
+                                "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+                                "object-src 'none'; base-uri 'self'; form-action 'self'; "
+                                "frame-ancestors 'self' https://huggingface.co https://*.huggingface.co https://*.hf.space"),
+}
+
+
+def create_app(engine: Engine | None = None, projects_dir: Path | None = None, rosters_path: Path | None = None,
+               public: bool | None = None, session_dir: Path | None = None, rate_general: int | None = None,
+               rate_heavy: int | None = None, max_sessions: int = 300) -> FastAPI:
+    """Build the app. ``public`` (or DATALENS_PUBLIC=1) turns on per-visitor sessions, rate limits, caps and headers."""
+    public = (os.environ.get("DATALENS_PUBLIC") == "1") if public is None else public
+    app = FastAPI(title="DataLens AI", version="0.2.0", docs_url=None if public else "/docs",
+                  redoc_url=None, openapi_url=None if public else "/openapi.json",
                   description="Cricket analytics: roles, custom metrics, matchups, venues, auction tools.")
     engine = engine or Engine()
-    agent = ChatAgent(engine)
-    uploads = UploadStore()
-    rosters = RosterStore(engine, rosters_path or config.ROSTERS_CSV)
-    pdir = Path(projects_dir or config.PROJECTS_DIR)
-    state = {"prices": None, "prices_source": "none"}
+    allow_llm = (not public) or os.environ.get("DATALENS_ALLOW_LLM") == "1"
+    agent = ChatAgent(engine, allow_llm=allow_llm)
+    mgr = SessionManager(engine, public=public, projects_dir=Path(projects_dir or config.PROJECTS_DIR),
+                         rosters_path=Path(rosters_path or config.ROSTERS_CSV), base_dir=session_dir,
+                         max_sessions=max_sessions)
+    limiter = RateLimiter(rate_general or int(os.environ.get("DATALENS_RATE_GENERAL", "150")),
+                          rate_heavy or int(os.environ.get("DATALENS_RATE_HEAVY", "30")))
+    default_prices: dict = {}
 
-    def prices() -> pd.DataFrame:
-        if state["prices"] is None:
-            if not config.PRICES_CSV.exists():
-                budget.make_sample_prices(engine)
-            df, _ = budget.load_prices(engine)
-            state["prices"], state["prices_source"] = df, "sample (synthetic, illustrative only)"
-        return state["prices"]
+    def current(request: Request) -> Session:
+        try:
+            return mgr.get(request.headers.get("x-session-id"))
+        except SessionError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    def prices(s: Session) -> pd.DataFrame:
+        if s.prices is None:
+            if "df" not in default_prices:
+                if not config.PRICES_CSV.exists():
+                    budget.make_sample_prices(engine)
+                default_prices["df"], _ = budget.load_prices(engine)
+            s.prices, s.prices_source = default_prices["df"], "sample (synthetic, illustrative only)"
+        return s.prices
+
+    def client_key(request: Request) -> str:
+        fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        return fwd or (request.client.host if request.client else "unknown")
+
+    if public:
+        @app.middleware("http")
+        async def public_guard(request: Request, call_next):
+            path = request.url.path
+            if not path.startswith("/static") and path != "/api/health":
+                heavy = request.method != "GET" and path.startswith(HEAVY_PREFIXES)
+                if not limiter.allow(client_key(request), heavy):
+                    return JSONResponse({"detail": "Too many requests - please slow down and try again in a minute."},
+                                        status_code=429, headers={"Retry-After": "30"})
+                try:
+                    size = int(request.headers.get("content-length") or 0)
+                except ValueError:
+                    size = 0
+                cap = (mgr.upload_mb * 1024 * 1024 + 1024 * 1024) if path.startswith("/api/upload") else 4 * 1024 * 1024
+                if size > cap:
+                    return JSONResponse({"detail": "Request too large."}, status_code=413)
+            resp = await call_next(request)
+            for k, v in SECURITY_HEADERS.items():
+                resp.headers[k] = v
+            if path.startswith("/api/"):
+                resp.headers["Cache-Control"] = "no-store"
+            return resp
 
     def guard(fn, *a, **kw):
         try:
@@ -140,12 +239,17 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
     def meta():
         m = engine.meta()
         m["chat_mode"] = agent.mode
-        m["max_upload_mb"] = MAX_MB
+        m["max_upload_mb"] = mgr.upload_mb
+        m["public"] = public
         m["default_template"] = DEFAULT_TEMPLATE
         return m
 
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok", "public": public, "sessions": mgr.count()}
+
     @app.get("/api/players/search")
-    def players(q: str, limit: int = 8):
+    def players(q: str = Query(max_length=100), limit: int = Query(8, ge=1, le=25)):
         return engine.search_players(q, limit)
 
     # ---------------------------------------------------------------- analytics
@@ -178,8 +282,9 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
         return guard(engine.venue_profile, venue, f)
 
     @app.post("/api/similar")
-    def similar(req: SimilarReq):
-        pr = prices()
+    def similar(req: SimilarReq, request: Request):
+        s = current(request)
+        pr = prices(s)
         cands = None
         if req.max_price is not None or req.only_priced:
             sel = pr if req.max_price is None else pr[pr.price_cr <= req.max_price]
@@ -192,7 +297,7 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
         price_map = pr.set_index("player").price_cr.to_dict()
         for r in res["rows"]:
             r["price_cr"] = price_map.get(r["player"])
-        res["price_source"] = state["prices_source"]
+        res["price_source"] = s.prices_source
         return res
 
     @app.post("/api/squad/gaps")
@@ -201,23 +306,26 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
 
     # ---------------------------------------------------------------- auction
     @app.get("/api/prices")
-    def get_prices(limit: int = 300):
-        df = prices()
-        return {"source": state["prices_source"], "count": len(df), "rows": records(df.head(limit))}
+    def get_prices(request: Request, limit: int = Query(300, ge=1, le=2000)):
+        s = current(request)
+        df = prices(s)
+        return {"source": s.prices_source, "count": len(df), "rows": records(df.head(limit))}
 
     @app.post("/api/prices/upload")
-    async def upload_prices(file: UploadFile = File(...)):
-        raw = await file.read()
+    async def upload_prices(request: Request, file: UploadFile = File(...)):
+        s = current(request)
+        raw = await read_capped(file, SMALL_FILE)
         try:
             df = pd.read_csv(io.BytesIO(raw))
             df, unmatched = budget.load_prices(engine, df=df)
         except Exception as exc:
             raise HTTPException(400, str(exc)) from None
-        state["prices"], state["prices_source"] = df, f"uploaded: {file.filename}"
-        return {"count": len(df), "unmatched": unmatched, "source": state["prices_source"]}
+        s.prices, s.prices_source = df, f"uploaded: {(file.filename or 'file')[:80]}"
+        return {"count": len(df), "unmatched": unmatched, "source": s.prices_source}
 
     @app.post("/api/budget")
-    def optimise(req: BudgetReq):
+    def optimise(req: BudgetReq, request: Request):
+        s = current(request)
         slots = req.slots
         extra: dict = {}
         if not slots:
@@ -230,7 +338,7 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
                 raise HTTPException(400, "Your squad already covers the template - nothing to buy.")
         exclude, active_only, roster_info = req.exclude + req.squad, req.active_only, None
         if req.use_roster and req.team:
-            un = guard(rosters.unavailable, Filters.from_dict(req.filters), req.team, req.free, req.taken)
+            un = guard(s.rosters.unavailable, Filters.from_dict(req.filters), req.team, req.free, req.taken)
             exclude = exclude + sorted(un["players"])
             active_only = False  # released / unsigned players did not play the latest season for any team
             roster_info = {"team": req.team, "excluded_players": len(un["players"]), "other_teams": un["other_teams"],
@@ -241,35 +349,37 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
                                        f"{un['latest_season']} season). " if un["file_season"] else
                                        f"(auto-guessed from the {un['latest_season']} season; save a roster file to make this exact). ")
                                     + "Only players seen in the latest or previous season are suggested (the data can't know about retirements); check the 'last season' column.")}
-        res = guard(budget.optimize, engine, prices(), req.purse, slots, max_overseas=req.max_overseas,
+        res = guard(budget.optimize, engine, prices(s), req.purse, slots, max_overseas=req.max_overseas,
                     filters=req.filters, bat_formula=req.bat_formula, bowl_formula=req.bowl_formula,
                     exclude=exclude, active_only=active_only,
                     min_last_season=(roster_info or {}).get("latest_season", 0) - 1 or None)
         res["roster"] = roster_info
-        res["price_source"] = state["prices_source"]
+        res["price_source"] = s.prices_source
         res["slots"] = slots
         return res | extra
 
     # ---------------------------------------------------------------- rosters
     @app.get("/api/rosters/teams")
-    def roster_teams(competition: str | None = None, format: str | None = None, gender: str | None = None):
-        return guard(rosters.teams, Filters.from_dict({"competition": competition, "format": format, "gender": gender}))
+    def roster_teams(request: Request, competition: str | None = None, format: str | None = None, gender: str | None = None):
+        return guard(current(request).rosters.teams, Filters.from_dict({"competition": competition, "format": format, "gender": gender}))
 
     @app.get("/api/rosters/squad")
-    def roster_squad(team: str, competition: str | None = None, format: str | None = None, gender: str | None = None):
-        return guard(rosters.team_squad, Filters.from_dict({"competition": competition, "format": format, "gender": gender}), team)
+    def roster_squad(request: Request, team: str, competition: str | None = None, format: str | None = None, gender: str | None = None):
+        return guard(current(request).rosters.team_squad, Filters.from_dict({"competition": competition, "format": format, "gender": gender}), team)
 
     @app.post("/api/rosters/save")
-    def roster_save(req: RosterSaveReq):
-        return guard(rosters.save, Filters.from_dict(req.filters), req.season, req.team, req.retained, req.free, req.taken)
+    def roster_save(req: RosterSaveReq, request: Request):
+        return guard(current(request).rosters.save, Filters.from_dict(req.filters), req.season, req.team, req.retained, req.free, req.taken)
 
     @app.post("/api/rosters/upload")
-    async def roster_upload(file: UploadFile = File(...)):
+    async def roster_upload(request: Request, file: UploadFile = File(...)):
+        s = current(request)
+        raw = await read_capped(file, SMALL_FILE)
         try:
-            df = pd.read_csv(io.BytesIO(await file.read()), dtype=str)
+            df = pd.read_csv(io.BytesIO(raw), dtype=str)
         except Exception as exc:
             raise HTTPException(400, f"Could not read the file: {exc}") from None
-        return guard(rosters.upload, df)
+        return guard(s.rosters.upload, df)
 
     # ---------------------------------------------------------------- chat
     @app.post("/api/chat")
@@ -278,6 +388,8 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
 
     @app.post("/api/sql")
     def run_sql(req: SqlReq):
+        if public:
+            raise HTTPException(403, "Raw SQL over the cricket database is disabled on the public site.")
         try:
             sql = safe_select(req.query)
             df = engine.query(sql)
@@ -289,37 +401,41 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
 
     # ---------------------------------------------------------------- uploads
     @app.post("/api/upload")
-    async def upload(file: UploadFile = File(...)):
-        return guard(uploads.add, file.filename or "data.csv", await file.read())
+    async def upload(request: Request, file: UploadFile = File(...)):
+        s = current(request)
+        up = s.uploads
+        raw = await read_capped(file, up.max_bytes)
+        return guard(up.add, (file.filename or "data.csv")[:120], raw)
 
     @app.get("/api/upload")
-    def upload_list():
-        return {"tables": uploads.names()}
+    def upload_list(request: Request):
+        return {"tables": current(request).uploads.names()}
 
     @app.get("/api/upload/{name}/profile")
-    def upload_profile(name: str):
-        return guard(uploads.profile, name)
+    def upload_profile(name: str, request: Request):
+        return guard(current(request).uploads.profile, name)
 
     @app.post("/api/upload/{name}/clean")
-    def upload_clean(name: str, fill: str = "none"):
-        return guard(uploads.clean, name, fill)
+    def upload_clean(name: str, request: Request, fill: str = "none"):
+        return guard(current(request).uploads.clean, name, fill)
 
     @app.post("/api/upload/sql")
-    def upload_sql(req: SqlReq):
-        return guard(uploads.query, req.query)
+    def upload_sql(req: SqlReq, request: Request):
+        return guard(current(request).uploads.query, req.query)
 
     @app.get("/api/upload/{name}/chart")
-    def upload_chart(name: str, x: str, y: str | None = None, agg: str = "count"):
-        return guard(uploads.chart, name, x, y, agg)
+    def upload_chart(name: str, request: Request, x: str, y: str | None = None, agg: str = "count"):
+        return guard(current(request).uploads.chart, name, x, y, agg)
 
     # ---------------------------------------------------------------- projects + exports
-    def _pfile(pid: str) -> Path:
+    def _pfile(s: Session, pid: str) -> Path:
         if not re.fullmatch(r"[a-z0-9\-]{6,40}", pid):
             raise HTTPException(400, "Bad project id")
-        return pdir / f"{pid}.json"
+        return s.projects_dir / f"{pid}.json"
 
     @app.get("/api/projects")
-    def list_projects():
+    def list_projects(request: Request):
+        pdir = current(request).projects_dir
         pdir.mkdir(parents=True, exist_ok=True)
         out = []
         for p in sorted(pdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -328,24 +444,27 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
         return out
 
     @app.post("/api/projects")
-    def save_project(req: ProjectReq):
-        pdir.mkdir(parents=True, exist_ok=True)
+    def save_project(req: ProjectReq, request: Request):
+        s = current(request)
+        s.projects_dir.mkdir(parents=True, exist_ok=True)
+        if public and (len(list(s.projects_dir.glob("*.json"))) >= 50 or len(json.dumps(req.spec)) > 100_000):
+            raise HTTPException(400, "Project limit reached (50 projects, 100 KB each). Delete some first.")
         pid = uuid.uuid4().hex[:12]
         data = {"id": pid, "name": req.name[:120], "kind": req.kind, "spec": req.spec, "notes": req.notes[:2000],
                 "created": time.strftime("%Y-%m-%d %H:%M")}
-        _pfile(pid).write_text(json.dumps(data))
+        _pfile(s, pid).write_text(json.dumps(data))
         return data
 
     @app.get("/api/projects/{pid}")
-    def get_project(pid: str):
-        f = _pfile(pid)
+    def get_project(pid: str, request: Request):
+        f = _pfile(current(request), pid)
         if not f.exists():
             raise HTTPException(404, "Project not found")
         return json.loads(f.read_text())
 
     @app.delete("/api/projects/{pid}")
-    def delete_project(pid: str):
-        f = _pfile(pid)
+    def delete_project(pid: str, request: Request):
+        f = _pfile(current(request), pid)
         if not f.exists():
             raise HTTPException(404, "Project not found")
         f.unlink()
@@ -373,7 +492,8 @@ def create_app(engine: Engine | None = None, projects_dir: Path | None = None, r
 
     @app.exception_handler(Exception)
     async def unhandled(_, exc: Exception):
-        return JSONResponse({"detail": f"{type(exc).__name__}: {exc}"}, status_code=500)
+        detail = "Something went wrong on the server." if public else f"{type(exc).__name__}: {exc}"
+        return JSONResponse({"detail": detail}, status_code=500)
 
     return app
 
@@ -383,6 +503,6 @@ def get_app() -> FastAPI:  # for `uvicorn datalens.api:get_app --factory`
 
 
 if __name__ == "__main__":
-    import os
     import uvicorn
-    uvicorn.run(create_app(), host="127.0.0.1", port=int(os.environ.get("PORT", "8000")))
+    uvicorn.run(create_app(), host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")),
+                proxy_headers=True, forwarded_allow_ips="*")

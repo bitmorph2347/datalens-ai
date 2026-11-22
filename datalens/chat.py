@@ -202,11 +202,11 @@ def _scope_note(scope: dict | None) -> str:
 
 
 class ChatAgent:
-    def __init__(self, engine: Engine, client=None):
+    def __init__(self, engine: Engine, client=None, allow_llm: bool = True):
         self.e = engine
         self.tools = ToolBox(engine)
         self.client = client
-        if self.client is None and os.environ.get("ANTHROPIC_API_KEY"):
+        if self.client is None and allow_llm and os.environ.get("ANTHROPIC_API_KEY"):
             import anthropic
             self.client = anthropic.Anthropic()
 
